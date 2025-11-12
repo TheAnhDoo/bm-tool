@@ -1,6 +1,0 @@
-2025/11/11-23:59:45.702 8703 Creating DB /Users/theanh/Bm-Invite/bminvite/C:\Users\hangs\AppData\Roaming\bm-invite-tool\chrome-profiles\profile-1762850518860/Default/IndexedDB/https_www.facebook.com_0.indexeddb.leveldb since it was missing.
-2025/11/11-23:59:45.705 8703 Reusing MANIFEST /Users/theanh/Bm-Invite/bminvite/C:\Users\hangs\AppData\Roaming\bm-invite-tool\chrome-profiles\profile-1762850518860/Default/IndexedDB/https_www.facebook.com_0.indexeddb.leveldb/MANIFEST-000001
-2025/11/11-23:59:48.790 8703 Level-0 table #5: started
-2025/11/11-23:59:48.794 8703 Level-0 table #5: 20323 bytes OK
-2025/11/11-23:59:48.796 8703 Delete type=0 #3
-2025/11/11-23:59:48.796 8703 Manual compaction at level-0 from '\x00\x08\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x09\x00\x00\x00' @ 0 : 0; will stop at (end)

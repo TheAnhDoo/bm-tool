@@ -33,6 +33,8 @@ prisma/data/
 # Chrome profiles (user data directories)
 profile-*/
 chrome-profiles/
+bminvite/profile-*/
+bminvite/chrome-profiles/
 
 # Screenshots and artifacts
 screenshots/
