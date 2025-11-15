@@ -35,3 +35,26 @@ export function getChromeProfilesPath(): string {
   return join(app.getPath('userData'), 'chrome-profiles');
 }
 
+/**
+ * Finds the system Chrome executable path on Windows
+ * Returns null if not found, which will make Puppeteer use its bundled Chromium
+ */
+export function findSystemChromePath(): string | null {
+  const possiblePaths = [
+    // Common Chrome installation paths on Windows
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    join(process.env.PROGRAMFILES || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    join(process.env['PROGRAMFILES(X86)'] || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+  ];
+
+  for (const path of possiblePaths) {
+    if (path && existsSync(path)) {
+      return path;
+    }
+  }
+
+  return null;
+}
+

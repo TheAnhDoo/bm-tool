@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto';
+import { logger } from './logger';
 
 const ALGORITHM = 'aes-256-gcm';
 const SALT = 'bminvite-salt-2024'; // In production, use environment variable
@@ -47,6 +48,24 @@ export function decrypt(encryptedText: string): string {
     return decrypted;
   } catch (error) {
     throw new Error(`Decryption failed: ${error}`);
+  }
+}
+
+/**
+ * Safely decrypts encrypted text, returning null if decryption fails.
+ * This is useful when dealing with potentially corrupted or invalid encrypted data.
+ */
+export function safeDecrypt(encryptedText: string | null | undefined): string | null {
+  if (!encryptedText || typeof encryptedText !== 'string' || encryptedText.trim() === '') {
+    return null;
+  }
+
+  try {
+    return decrypt(encryptedText);
+  } catch (error) {
+    // Log the error but don't throw - allow the application to continue
+    logger.warn('Failed to decrypt data:', error);
+    return null;
   }
 }
 

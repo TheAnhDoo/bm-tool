@@ -20,6 +20,8 @@ interface Profile {
   proxy: string;
   status: string;
   pinned: boolean;
+  password?: string | null;
+  twoFAKey?: string | null;
   cookie?: string | null;
 }
 
@@ -41,7 +43,7 @@ export function EditProfileDialog({ open, onOpenChange, profile, onProfileUpdate
   useEffect(() => {
     if (open && profile) {
       setUid(profile.uid || "");
-      // Don't load password/2FA/cookie for security - user needs to re-enter if changing
+      // Don't load password/2FA/cookie values for security, but we'll show if they exist
       setPassword("");
       setTwoFAKey("");
       setCookie("");
@@ -171,14 +173,16 @@ export function EditProfileDialog({ open, onOpenChange, profile, onProfileUpdate
             <Input
               id="edit-password"
               type="password"
-              placeholder="Leave empty to keep current password"
+              placeholder={profile.password ? "Enter new password (current password exists)" : "Enter password (currently not set)"}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="rounded-xl h-11"
               style={{ borderColor: "#E5E7EB" }}
             />
             <p className="text-xs" style={{ color: "#6B7280" }}>
-              Leave empty if you don't want to change the password
+              {profile.password 
+                ? "Current password exists. Enter new password to update, or leave empty to keep current."
+                : "No password currently set. Enter a password to add one."}
             </p>
           </div>
 
@@ -187,14 +191,16 @@ export function EditProfileDialog({ open, onOpenChange, profile, onProfileUpdate
             <Label htmlFor="edit-two-fa" className="text-base">2FA Key</Label>
             <Input
               id="edit-two-fa"
-              placeholder="Leave empty to keep current 2FA key"
+              placeholder={profile.twoFAKey ? "Enter new 2FA key (current 2FA key exists)" : "Enter 2FA key (currently not set)"}
               value={twoFAKey}
               onChange={(e) => setTwoFAKey(e.target.value)}
               className="rounded-xl h-11"
               style={{ borderColor: "#E5E7EB" }}
             />
             <p className="text-xs" style={{ color: "#6B7280" }}>
-              Leave empty if you don't want to change the 2FA key
+              {profile.twoFAKey 
+                ? "Current 2FA key exists. Enter new key to update, or leave empty to keep current."
+                : "No 2FA key currently set. Enter a 2FA key to add one."}
             </p>
           </div>
 
@@ -203,14 +209,16 @@ export function EditProfileDialog({ open, onOpenChange, profile, onProfileUpdate
             <Label htmlFor="edit-cookie" className="text-base">Facebook Cookie</Label>
             <Textarea
               id="edit-cookie"
-              placeholder="Paste Facebook cookie string here (leave empty to keep current cookie)"
+              placeholder={profile.cookie ? "Paste new Facebook cookie (current cookie exists)" : "Paste Facebook cookie string (currently not set)"}
               value={cookie}
               onChange={(e) => setCookie(e.target.value)}
               className="rounded-xl min-h-[100px] font-mono text-xs"
               style={{ borderColor: "#E5E7EB" }}
             />
             <p className="text-xs" style={{ color: "#6B7280" }}>
-              Paste the full Facebook cookie string. If provided, this will be used for login instead of password.
+              {profile.cookie 
+                ? "Current cookie exists. Paste new cookie to update, or leave empty to keep current. If provided, this will be used for login instead of password."
+                : "No cookie currently set. Paste the full Facebook cookie string to add one. If provided, this will be used for login instead of password."}
             </p>
           </div>
         </div>

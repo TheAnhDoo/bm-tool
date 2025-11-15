@@ -50,7 +50,7 @@ class APIService {
     return this.callIPC('profiles:import', { filePath, type, accounts });
   }
 
-  async updateProfile(id: number, data: { uid?: string; password?: string; twoFAKey?: string; deviceConfig?: string }) {
+  async updateProfile(id: number, data: { uid?: string; password?: string; twoFAKey?: string; cookie?: string; deviceConfig?: string }) {
     return this.callIPC('profiles:update', id, data);
   }
 

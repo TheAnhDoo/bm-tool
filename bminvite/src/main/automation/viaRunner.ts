@@ -3,8 +3,8 @@ import puppeteerExtra from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { Profile } from '@prisma/client';
 import { getPrismaClient } from '../db/prismaClient';
-import { decrypt } from '../utils/crypto';
-import { getScreenshotsPath } from '../utils/fileHelpers';
+// Encryption removed - using plain text
+import { getScreenshotsPath, findSystemChromePath } from '../utils/fileHelpers';
 import { logger } from '../utils/logger';
 import { join } from 'path';
 import { parseProxy } from '../utils/proxyParser';
@@ -49,6 +49,9 @@ export class ViaRunner {
       '--disable-blink-features=AutomationControlled',
       '--disable-dev-shm-usage',
       `--user-agent=${deviceConfig.userAgent}`,
+      // Remove automation banner and make it look like regular Chrome
+      '--disable-infobars',
+      '--disable-notifications',
     ];
 
     // Only add window size/position args if not headless
@@ -57,13 +60,70 @@ export class ViaRunner {
       args.push(`--window-position=${x},${y}`);
     }
 
-    this.browser = await puppeteerExtra.launch({
+    // Try to use system Chrome first (looks more normal), fall back to Puppeteer's Chromium
+    const chromePath = findSystemChromePath();
+    const launchOptions: any = {
       headless: isHeadless,
       userDataDir: this.profile.chromeProfile,
       args,
-    });
+      // Exclude the enable-automation flag to remove the banner
+      ignoreDefaultArgs: ['--enable-automation'],
+    };
+
+    if (chromePath) {
+      launchOptions.executablePath = chromePath;
+    }
+
+    this.browser = await puppeteerExtra.launch(launchOptions);
 
     this.page = await this.browser.newPage();
+
+    // Remove webdriver property and automation indicators
+    await this.page.evaluateOnNewDocument(() => {
+      // Remove webdriver property
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => false,
+      });
+
+      // Override chrome runtime
+      (window as any).chrome = {
+        runtime: {},
+      };
+
+      // Remove automation indicators
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [1, 2, 3, 4, 5],
+      });
+
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en'],
+      });
+
+      // Set custom window title that persists
+      const profileId = (window as any).__PROFILE_ID__ || '';
+      Object.defineProperty(document, 'title', {
+        get: () => `VIA Profile #${profileId}`,
+        set: () => {},
+        configurable: true,
+      });
+    });
+
+    // Set profile ID and ensure title is set
+    await this.page.evaluate((profileId) => {
+      (window as any).__PROFILE_ID__ = profileId;
+      document.title = `VIA Profile #${profileId}`;
+    }, this.profile.id);
+
+    // Update title after any navigation
+    this.page.on('framenavigated', async () => {
+      try {
+        await this.page!.evaluate((profileId) => {
+          document.title = `VIA Profile #${profileId}`;
+        }, this.profile.id);
+      } catch (e) {
+        // Ignore errors
+      }
+    });
 
     // Set proxy authentication if credentials are provided
     if (proxy.username && proxy.password) {
@@ -310,8 +370,8 @@ export class ViaRunner {
     }
 
     const uid = this.profile.uid;
-    const password = this.profile.password ? decrypt(this.profile.password) : null;
-    const cookie = (this.profile as any).cookie ? decrypt((this.profile as any).cookie) : null;
+    const password = this.profile.password || null;
+    const cookie = (this.profile as any).cookie || null;
 
     if (!uid) {
       throw new Error('UID required for login');
@@ -358,7 +418,7 @@ export class ViaRunner {
 
     // Handle 2FA if needed
     if (this.profile.twoFAKey) {
-      const twoFAKey = decrypt(this.profile.twoFAKey);
+      const twoFAKey = this.profile.twoFAKey;
       await this.logAction('2fa-required', '2FA code required', 'info');
       // TODO: Implement 2FA handling
       logger.warn('2FA not yet implemented - manual intervention may be required');

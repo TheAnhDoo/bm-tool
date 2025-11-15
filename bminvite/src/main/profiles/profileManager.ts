@@ -1,7 +1,7 @@
 import { getPrismaClient } from '../db/prismaClient';
 import { generateFingerprint } from './fingerprintGenerator';
 import { getChromeProfilesPath } from '../utils/fileHelpers';
-import { encrypt, decrypt } from '../utils/crypto';
+// Encryption removed - storing data in plain text
 import { join } from 'path';
 import { mkdirSync } from 'fs';
 import { logger } from '../utils/logger';
@@ -114,19 +114,15 @@ export class ProfileManager {
     const chromeProfilePath = join(getChromeProfilesPath(), `profile-${profileId}`);
     mkdirSync(chromeProfilePath, { recursive: true });
 
-    // Encrypt sensitive data
-    const encryptedPassword = password ? encrypt(password) : null;
-    const encryptedTwoFA = twoFAKey ? encrypt(twoFAKey) : null;
-    const encryptedCookie = cookie ? encrypt(cookie) : null;
-
+    // Store sensitive data in plain text (no encryption)
     // Create profile in database
     const profile = await this.prisma.profile.create({
       data: {
         type,
         uid,
-        password: encryptedPassword,
-        twoFAKey: encryptedTwoFA,
-        cookie: encryptedCookie,
+        password: password || null,
+        twoFAKey: twoFAKey || null,
+        cookie: cookie || null,
         proxy,
         chromeProfile: chromeProfilePath,
         deviceConfig: JSON.stringify(deviceConfig),
@@ -199,9 +195,9 @@ export class ProfileManager {
       throw new Error(`Profile ${profileId} (${profile.type}) must have a UID configured before opening`);
     }
 
-    // Check if profile has either cookie or password
-    const password = profile.password ? decrypt(profile.password) : null;
-    const cookie = (profile as any).cookie ? decrypt((profile as any).cookie) : null;
+    // Check if profile has either cookie or password (plain text, no decryption needed)
+    const password = profile.password;
+    const cookie = (profile as any).cookie;
     
     if ((!password || password.trim() === '') && (!cookie || cookie.trim() === '')) {
       throw new Error(`Profile ${profileId} (${profile.type}) must have either a password or cookie configured before opening`);
@@ -218,6 +214,31 @@ export class ProfileManager {
     });
 
     logger.info(`Opened browser for profile ${profileId}`);
+  }
+
+  /**
+   * Helper method to close blank tabs without closing the main page
+   */
+  private async closeBlankTabs(browser: any, mainPage: any, profileId: number): Promise<void> {
+    try {
+      const pages = await browser.pages();
+      for (const page of pages) {
+        // Only close blank tabs that are NOT the main page
+        if (page !== mainPage) {
+          const url = page.url();
+          if (url === 'about:blank' || url === 'chrome://newtab/' || url === '' || url.startsWith('chrome://')) {
+            try {
+              await page.close();
+              logger.debug(`Profile ${profileId}: Closed blank tab`);
+            } catch (e) {
+              // Ignore errors closing tabs
+            }
+          }
+        }
+      }
+    } catch (e) {
+      // Ignore errors
+    }
   }
 
   private async openBrowserProfile(profileId: number): Promise<void> {
@@ -254,8 +275,8 @@ export class ProfileManager {
     const runnerAny = runner as any;
     if (runnerAny.page) {
       try {
-        // If cookie is available, set it BEFORE navigation
-        const cookie = (profile as any).cookie ? decrypt((profile as any).cookie) : null;
+        // If cookie is available, set it BEFORE navigation (plain text, no decryption needed)
+        const cookie = (profile as any).cookie;
         if (cookie && cookie.trim() !== '') {
           try {
             // Determine target domain based on profile type
@@ -302,19 +323,41 @@ export class ProfileManager {
               } else {
                 logger.warn(`Profile ${profileId}: Cookies set but login status unclear`);
               }
+              
+              // Close any remaining blank tabs after navigation (but not the main page)
+              await this.closeBlankTabs(runnerAny.browser, runnerAny.page, profileId);
             } else {
               logger.warn(`Profile ${profileId}: No valid cookies parsed from cookie string`);
               // Navigate anyway
               await runnerAny.page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+              
+              // Close any remaining blank tabs (but not the main page)
+              await this.closeBlankTabs(runnerAny.browser, runnerAny.page, profileId);
             }
           } catch (cookieError: any) {
             logger.error(`Profile ${profileId}: Failed to set cookies:`, cookieError);
             // Navigate anyway even if cookie setting fails
             await runnerAny.page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+            
+            // Close any remaining blank tabs
+            const pagesAfter = await runnerAny.browser.pages();
+            for (const page of pagesAfter) {
+              const url = page.url();
+              if ((url === 'about:blank' || url === 'chrome://newtab/' || url === '') && page !== runnerAny.page) {
+                try {
+                  await page.close();
+                } catch (e) {
+                  // Ignore errors
+                }
+              }
+            }
           }
         } else {
           // No cookie, just navigate
           await runnerAny.page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+          
+          // Close any remaining blank tabs after navigation (but not the main page)
+          await this.closeBlankTabs(runnerAny.browser, runnerAny.page, profileId);
         }
       } catch (error: any) {
         logger.warn(`Failed to navigate browser for profile ${profileId}:`, error);
@@ -325,7 +368,48 @@ export class ProfileManager {
     // Store runner instance so we can close browser later
     this.openBrowsers.set(profileId, runner);
 
+    // Listen for browser close event and update status
+    // runnerAny is already declared above, reuse it
+    if (runnerAny.browser) {
+      runnerAny.browser.on('disconnected', async () => {
+        // Browser was closed, update status to idle
+        try {
+          await this.prisma.profile.update({
+            where: { id: profileId },
+            data: { status: 'idle' },
+          });
+          this.openBrowsers.delete(profileId);
+          this.browserWindowCount = Math.max(0, this.browserWindowCount - 1);
+          logger.info(`Profile ${profileId}: Browser closed, status set to idle`);
+        } catch (error: any) {
+          logger.error(`Profile ${profileId}: Failed to update status on browser close:`, error);
+        }
+      });
+    }
+
     logger.info(`Browser opened for profile ${profileId} (manual mode)`);
+  }
+
+  /**
+   * Reset all "running" profiles to "idle" on app startup
+   * This is called when the app starts to clean up stale status
+   */
+  async resetRunningProfilesOnStartup(): Promise<void> {
+    try {
+      const runningProfiles = await this.prisma.profile.findMany({
+        where: { status: 'running' },
+      });
+
+      if (runningProfiles.length > 0) {
+        await this.prisma.profile.updateMany({
+          where: { status: 'running' },
+          data: { status: 'idle' },
+        });
+        logger.info(`Reset ${runningProfiles.length} profile(s) from "running" to "idle" on startup`);
+      }
+    } catch (error: any) {
+      logger.error('Failed to reset running profiles on startup:', error);
+    }
   }
 
   async stopProfile(profileId: number) {
@@ -353,10 +437,10 @@ export class ProfileManager {
     // Remove from automation queue (in case it was added)
     await this.getQueue().removeProfileJob(profileId);
 
-    // Update status
+    // Update status to idle (not stopped, since stopped implies error)
     await this.prisma.profile.update({
       where: { id: profileId },
-      data: { status: 'stopped' },
+      data: { status: 'idle' },
     });
 
     logger.info(`Stopped profile ${profileId}`);

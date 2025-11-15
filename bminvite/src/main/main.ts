@@ -7,6 +7,7 @@ import { logger } from './utils/logger';
 import { ensureDirectories } from './utils/fileHelpers';
 import { ensureEnvFile } from './utils/envSetup';
 import { initializeSchema } from './db/schemaInit';
+import { ProfileManager } from './profiles/profileManager';
 
 let mainWindow: BrowserWindow | null = null;
 let apiServer: any = null;
@@ -56,6 +57,10 @@ async function initialize() {
     // Initialize database schema (auto-setup on first launch)
     await initializeSchema(process.env.DATABASE_URL);
     logger.info('Database initialized');
+
+    // Reset any "running" profiles to "idle" on startup (browsers aren't actually running)
+    const profileManager = new ProfileManager();
+    await profileManager.resetRunningProfilesOnStartup();
 
     // Start API server
     apiServer = await startApiServer();

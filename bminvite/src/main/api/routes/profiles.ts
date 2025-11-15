@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { getPrismaClient } from '../../db/prismaClient';
 import { ProfileManager } from '../../profiles/profileManager';
-import { encrypt, decrypt } from '../../utils/crypto';
+// Encryption removed - storing data in plain text
 import { logger } from '../../utils/logger';
 
 interface CreateProfileBody {
@@ -58,12 +58,12 @@ export async function registerProfileRoutes(fastify: FastifyInstance) {
         orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
       });
 
-      // Decrypt sensitive data
+      // Return profiles with plain text data (no decryption needed)
       const decryptedProfiles = profiles.map((p) => ({
         ...p,
-        password: p.password ? decrypt(p.password) : null,
-        twoFAKey: p.twoFAKey ? decrypt(p.twoFAKey) : null,
-        cookie: p.cookie ? decrypt(p.cookie) : null,
+        password: p.password,
+        twoFAKey: p.twoFAKey,
+        cookie: p.cookie,
       }));
 
       return { profiles: decryptedProfiles };
@@ -186,9 +186,9 @@ export async function registerProfileRoutes(fastify: FastifyInstance) {
       return {
         profile: {
           ...profile,
-          password: profile.password ? decrypt(profile.password) : null,
-          twoFAKey: profile.twoFAKey ? decrypt(profile.twoFAKey) : null,
-          cookie: profile.cookie ? decrypt(profile.cookie) : null,
+          password: profile.password,
+          twoFAKey: profile.twoFAKey,
+          cookie: profile.cookie,
         },
       };
     } catch (error: any) {
@@ -201,13 +201,20 @@ export async function registerProfileRoutes(fastify: FastifyInstance) {
   fastify.put('/:id', async (request: FastifyRequest<{ Params: { id: string }; Body: UpdateProfileBody }>, reply: FastifyReply) => {
     try {
       const id = parseInt(request.params.id);
+      
+      // Check if profile exists first
+      const existingProfile = await prisma.profile.findUnique({ where: { id } });
+      if (!existingProfile) {
+        return reply.code(404).send({ error: 'Profile not found' });
+      }
+      
       const { uid, password, twoFAKey, cookie, deviceConfig } = request.body;
 
       const updateData: any = {};
       if (uid !== undefined) updateData.uid = uid;
-      if (password !== undefined) updateData.password = password ? encrypt(password) : null;
-      if (twoFAKey !== undefined) updateData.twoFAKey = twoFAKey ? encrypt(twoFAKey) : null;
-      if (cookie !== undefined) updateData.cookie = cookie ? encrypt(cookie) : null;
+      if (password !== undefined) updateData.password = password || null;
+      if (twoFAKey !== undefined) updateData.twoFAKey = twoFAKey || null;
+      if (cookie !== undefined) updateData.cookie = cookie || null;
       if (deviceConfig !== undefined) updateData.deviceConfig = deviceConfig;
 
       const profile = await prisma.profile.update({
@@ -218,9 +225,9 @@ export async function registerProfileRoutes(fastify: FastifyInstance) {
       return {
         profile: {
           ...profile,
-          password: profile.password ? decrypt(profile.password) : null,
-          twoFAKey: profile.twoFAKey ? decrypt(profile.twoFAKey) : null,
-          cookie: profile.cookie ? decrypt(profile.cookie) : null,
+          password: profile.password,
+          twoFAKey: profile.twoFAKey,
+          cookie: profile.cookie,
         },
       };
     } catch (error: any) {
@@ -315,10 +322,23 @@ export async function registerProfileRoutes(fastify: FastifyInstance) {
   fastify.delete('/:id', async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
     try {
       const id = parseInt(request.params.id);
+      
+      // Check if profile exists first
+      const existingProfile = await prisma.profile.findUnique({ where: { id } });
+      if (!existingProfile) {
+        return reply.code(404).send({ error: 'Profile not found' });
+      }
+      
       await prisma.profile.delete({ where: { id } });
       
       // Renumber all remaining profiles to have sequential IDs
-      await renumberProfileIds();
+      // Wrap in try-catch to prevent delete failure if renumbering fails
+      try {
+        await renumberProfileIds();
+      } catch (renumberError: any) {
+        logger.warn('Failed to renumber profile IDs after delete (non-critical):', renumberError);
+        // Don't fail the delete operation if renumbering fails
+      }
       
       return { success: true };
     } catch (error: any) {
