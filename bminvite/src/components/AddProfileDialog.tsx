@@ -33,6 +33,7 @@ export function AddProfileDialog({ open, onOpenChange }: AddProfileDialogProps) 
   const [proxyUser, setProxyUser] = useState("");
   const [proxyPass, setProxyPass] = useState("");
   const [uidPassTwoFa, setUidPassTwoFa] = useState("");
+  const [bmUid, setBmUid] = useState(""); // UID BM Trung Gian (only for BM profiles)
   const [fingerprint, setFingerprint] = useState("random");
   const [customFingerprint, setCustomFingerprint] = useState<any>(null);
   const [headless, setHeadless] = useState(false);
@@ -72,14 +73,14 @@ export function AddProfileDialog({ open, onOpenChange }: AddProfileDialogProps) 
     try {
       const proxyString = `${proxyIP}:${proxyPort}${proxyUser ? `:${proxyUser}${proxyPass ? `:${proxyPass}` : ''}` : ''}`;
       
-      // Parse UID|PASS|2FA if provided
-      let uid: string | undefined;
+      // Parse USERNAME|PASS|2FA if provided
+      let username: string | undefined;
       let password: string | undefined;
       let twoFAKey: string | undefined;
       
       if (uidPassTwoFa) {
         const parts = uidPassTwoFa.split('|');
-        uid = parts[0]?.trim() || undefined;
+        username = parts[0]?.trim() || undefined;
         password = parts[1]?.trim() || undefined;
         twoFAKey = parts[2]?.trim() || undefined;
       }
@@ -97,7 +98,8 @@ export function AddProfileDialog({ open, onOpenChange }: AddProfileDialogProps) 
         type: profileType,
         proxy: proxyString,
         fingerprint: fingerprintValue,
-        uid,
+        username,
+        bmUid: profileType === 'BM' ? (bmUid.trim() || undefined) : undefined, // Only set bmUid for BM profiles
         password,
         twoFAKey,
         headless,
@@ -155,6 +157,7 @@ export function AddProfileDialog({ open, onOpenChange }: AddProfileDialogProps) 
     setProxyUser("");
     setProxyPass("");
     setUidPassTwoFa("");
+    setBmUid("");
     setFingerprint("random");
     setHeadless(false);
     setProfileType("VIA");
@@ -293,14 +296,32 @@ export function AddProfileDialog({ open, onOpenChange }: AddProfileDialogProps) 
             </div>
 
             <div className="space-y-2">
-              <Label>UID | Password | 2FA (Optional)</Label>
+              <Label>Username | Password | 2FA (Optional)</Label>
               <Textarea
-                placeholder="UID|PASSWORD|2FA_KEY (pipe-separated)"
+                placeholder="USERNAME|PASSWORD|2FA_KEY (pipe-separated)"
                 value={uidPassTwoFa}
                 onChange={(e) => setUidPassTwoFa(e.target.value)}
                 rows={3}
               />
             </div>
+
+            {/* BM UID field (only for BM profiles) */}
+            {profileType === 'BM' && (
+              <div className="space-y-2">
+                <Label htmlFor="bm-uid">UID BM Trung Gian (Optional)</Label>
+                <Input
+                  id="bm-uid"
+                  placeholder="UID BM Trung Gian (business_id)"
+                  value={bmUid}
+                  onChange={(e) => setBmUid(e.target.value)}
+                  className="rounded-xl"
+                  style={{ borderColor: "#E5E7EB" }}
+                />
+                <p className="text-xs" style={{ color: "#6B7280" }}>
+                  UID này sẽ được dùng để tạo link dashboard BM: https://business.facebook.com/latest/home?nav_ref=bm_home_redirect&business_id={bmUid || 'YOUR_BM_UID'}
+                </p>
+              </div>
+            )}
           </TabsContent>
 
           <TabsContent value="import" className="space-y-4 mt-4">
@@ -323,7 +344,7 @@ export function AddProfileDialog({ open, onOpenChange }: AddProfileDialogProps) 
                 Import profiles from CSV/TXT file
               </p>
               <p className="text-xs text-gray-400 mb-4">
-                Format: UID|PASSWORD|2FA|PROXY_IP:PROXY_PORT:PROXY_USER:PROXY_PASS
+                Format: USERNAME|PASSWORD|2FA|PROXY_IP:PROXY_PORT:PROXY_USER:PROXY_PASS
               </p>
               <Button onClick={handleImportCSV} disabled={saving}>
                 <Upload size={16} className="mr-2" />

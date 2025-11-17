@@ -8,13 +8,28 @@ export async function registerDashboardRoutes(fastify: FastifyInstance) {
   // GET /api/dashboard/stats - Get dashboard statistics
   fastify.get('/stats', async (_request: FastifyRequest, reply: FastifyReply) => {
     try {
-      const [totalProfiles, viaProfiles, bmProfiles, totalInvites, runningProfiles] = await Promise.all([
-        prisma.profile.count(),
-        prisma.profile.count({ where: { type: 'VIA' } }),
-        prisma.profile.count({ where: { type: 'BM' } }),
-        prisma.invite.count(),
-        prisma.profile.count({ where: { status: 'running' } }),
+      // Use raw queries to handle cases where tables might not exist
+      const [totalProfilesRaw, viaProfilesRaw, bmProfilesRaw, runningProfilesRaw] = await Promise.all([
+        prisma.$queryRawUnsafe<Array<{ count: number }>>(`SELECT COUNT(*) as count FROM "Profile"`),
+        prisma.$queryRawUnsafe<Array<{ count: number }>>(`SELECT COUNT(*) as count FROM "Profile" WHERE "type" = 'VIA'`),
+        prisma.$queryRawUnsafe<Array<{ count: number }>>(`SELECT COUNT(*) as count FROM "Profile" WHERE "type" = 'BM'`),
+        prisma.$queryRawUnsafe<Array<{ count: number }>>(`SELECT COUNT(*) as count FROM "Profile" WHERE "status" = 'running'`),
       ]);
+
+      // Check if Invite table exists before querying
+      let totalInvites = 0;
+      try {
+        const inviteCountRaw = await prisma.$queryRawUnsafe<Array<{ count: number }>>(`SELECT COUNT(*) as count FROM "Invite"`);
+        totalInvites = inviteCountRaw[0]?.count || 0;
+      } catch (e) {
+        // Table doesn't exist, use 0
+        logger.debug('Invite table does not exist yet');
+      }
+
+      const totalProfiles = totalProfilesRaw[0]?.count || 0;
+      const viaProfiles = viaProfilesRaw[0]?.count || 0;
+      const bmProfiles = bmProfilesRaw[0]?.count || 0;
+      const runningProfiles = runningProfilesRaw[0]?.count || 0;
 
       return {
         totalProfiles,

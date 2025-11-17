@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Download, RefreshCw } from "lucide-react";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
@@ -10,94 +10,71 @@ import {
   TableHeader,
   TableRow,
 } from "./ui/table";
+import { api } from "../renderer/services/api";
 
 interface Report {
   id: number;
   idVia: string;
-  uid: string;
+  username: string; // Username của VIA
   idAdAccount: string;
   idBM: string;
+  bmUid?: string | null; // UID BM Trung Gian
   status: "completed" | "pending";
   time: string;
 }
 
-const mockReports: Report[] = [
-  {
-    id: 1,
-    idVia: "via_01",
-    uid: "100123",
-    idAdAccount: "act_123456789",
-    idBM: "bm_001",
-    status: "completed",
-    time: "2025-11-05 14:30:25",
-  },
-  {
-    id: 2,
-    idVia: "via_02",
-    uid: "100124",
-    idAdAccount: "act_987654321",
-    idBM: "bm_002",
-    status: "pending",
-    time: "2025-11-05 14:25:10",
-  },
-  {
-    id: 3,
-    idVia: "via_03",
-    uid: "100125",
-    idAdAccount: "act_555666777",
-    idBM: "bm_001",
-    status: "completed",
-    time: "2025-11-05 14:20:45",
-  },
-  {
-    id: 4,
-    idVia: "via_04",
-    uid: "100126",
-    idAdAccount: "act_111222333",
-    idBM: "bm_003",
-    status: "pending",
-    time: "2025-11-05 14:15:30",
-  },
-  {
-    id: 5,
-    idVia: "via_05",
-    uid: "100127",
-    idAdAccount: "act_444555666",
-    idBM: "bm_002",
-    status: "completed",
-    time: "2025-11-05 14:10:15",
-  },
-];
-
 export function ReportDashboard() {
-  const [reports, setReports] = useState<Report[]>(mockReports);
+  const [reports, setReports] = useState<Report[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  const handleRefresh = () => {
-    setIsRefreshing(true);
-    setTimeout(() => {
-      setIsRefreshing(false);
-      console.log("Data refreshed");
-    }, 1000);
+  useEffect(() => {
+    loadReports();
+  }, []);
+
+  const loadReports = async () => {
+    setLoading(true);
+    try {
+      const result = await api.listReports();
+      if (result.success && result.data?.reports) {
+        // Map API response to Report interface
+        const mappedReports: Report[] = result.data.reports.map((r: any) => ({
+          id: r.id,
+          idVia: r.idVia || null,
+          username: r.username || null,
+          idAdAccount: r.idAdAccount || null,
+          idBM: r.idBM || null,
+          bmUid: r.bmUid || null,
+          status: r.status === 'completed' ? 'completed' : 'pending',
+          time: r.time ? new Date(r.time).toLocaleString('vi-VN') : new Date().toLocaleString('vi-VN'),
+        }));
+        setReports(mappedReports);
+      }
+    } catch (error: any) {
+      console.error('Failed to load reports:', error);
+      alert(`Failed to load reports: ${error.message || 'Unknown error'}`);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleExportCSV = () => {
-    console.log("Exporting CSV");
-    const csvContent =
-      "ID Via,UID,ID Ad Account,ID BM,Status,Time\n" +
-      reports
-        .map(
-          (r) =>
-            `${r.idVia},${r.uid},${r.idAdAccount},${r.idBM},${r.status},${r.time}`
-        )
-        .join("\n");
-    
-    const blob = new Blob([csvContent], { type: "text/csv" });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "report.csv";
-    a.click();
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    await loadReports();
+    setIsRefreshing(false);
+  };
+
+  const handleExportCSV = async () => {
+    try {
+      const result = await api.exportReports('csv');
+      if (result.success && result.data?.path) {
+        alert(`Reports exported to: ${result.data.path}`);
+      } else {
+        alert(`Error: ${result.error}`);
+      }
+    } catch (error: any) {
+      alert(`Error: ${error.message}`);
+    }
   };
 
   const completedCount = reports.filter(r => r.status === "completed").length;
@@ -171,20 +148,35 @@ export function ReportDashboard() {
             <TableHeader>
               <TableRow style={{ borderColor: "#E5E7EB" }}>
                 <TableHead>ID Via</TableHead>
-                <TableHead>UID</TableHead>
+                <TableHead>Username</TableHead>
                 <TableHead>ID Ad Account</TableHead>
                 <TableHead>ID BM</TableHead>
+                <TableHead>BM UID</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Time</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {reports.map((report) => (
-                <TableRow key={report.id} style={{ borderColor: "#E5E7EB" }}>
-                  <TableCell>{report.idVia}</TableCell>
-                  <TableCell>{report.uid}</TableCell>
-                  <TableCell>{report.idAdAccount}</TableCell>
-                  <TableCell>{report.idBM}</TableCell>
+              {loading ? (
+                <TableRow>
+                  <TableCell colSpan={7} className="text-center py-8 text-gray-500">
+                    Đang tải dữ liệu...
+                  </TableCell>
+                </TableRow>
+              ) : reports.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={7} className="text-center py-8 text-gray-500">
+                    Không có báo cáo nào
+                  </TableCell>
+                </TableRow>
+              ) : (
+                reports.map((report) => (
+                  <TableRow key={report.id} style={{ borderColor: "#E5E7EB" }}>
+                    <TableCell>{report.idVia || 'N/A'}</TableCell>
+                    <TableCell>{report.username || 'N/A'}</TableCell>
+                    <TableCell>{report.idAdAccount || 'N/A'}</TableCell>
+                    <TableCell>{report.idBM || 'N/A'}</TableCell>
+                    <TableCell>{report.bmUid || 'N/A'}</TableCell>
                   <TableCell>
                     {report.status === "completed" ? (
                       <Badge className="rounded-full" style={{ backgroundColor: "#D1FAE5", color: "#10B981" }}>
@@ -196,9 +188,10 @@ export function ReportDashboard() {
                       </Badge>
                     )}
                   </TableCell>
-                  <TableCell style={{ color: "#6B7280" }}>{report.time}</TableCell>
-                </TableRow>
-              ))}
+                    <TableCell style={{ color: "#6B7280" }}>{report.time}</TableCell>
+                  </TableRow>
+                ))
+              )}
             </TableBody>
           </Table>
         </div>

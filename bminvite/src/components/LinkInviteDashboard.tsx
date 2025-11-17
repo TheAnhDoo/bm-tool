@@ -13,8 +13,8 @@ interface LinkInvite {
   notes: string | null;
   status: string;
   createdAt: string;
-  viaProfile?: { id: number; uid: string | null };
-  bmProfile?: { id: number; uid: string | null };
+  viaProfile?: { id: number; username: string | null };
+  bmProfile?: { id: number; username: string | null; bmUid?: string | null };
 }
 
 export function LinkInviteDashboard() {
@@ -207,8 +207,15 @@ export function LinkInviteDashboard() {
                           {link.status}
                         </span>
                       </TableCell>
-                      <TableCell>{link.viaProfile?.uid || 'N/A'}</TableCell>
-                      <TableCell>{link.bmProfile?.uid || 'N/A'}</TableCell>
+                      <TableCell>{link.viaProfile?.username || 'N/A'}</TableCell>
+                      <TableCell>
+                        <div className="flex flex-col gap-1">
+                          <span>{link.bmProfile?.username || 'N/A'}</span>
+                          {link.bmProfile?.bmUid && (
+                            <span className="text-xs text-gray-500">BM UID: {link.bmProfile.bmUid}</span>
+                          )}
+                        </div>
+                      </TableCell>
                       <TableCell>{link.notes || 'N/A'}</TableCell>
                       <TableCell>{new Date(link.createdAt).toLocaleString()}</TableCell>
                     </TableRow>

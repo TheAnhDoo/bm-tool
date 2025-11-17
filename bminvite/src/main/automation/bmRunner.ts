@@ -364,7 +364,8 @@ export class BMRunner {
       throw new Error('Page not initialized');
     }
 
-    const uid = this.profile.uid;
+    // Use username (new) or uid (old) for backward compatibility
+    const uid = (this.profile as any).username || this.profile.uid;
     const password = this.profile.password || null;
     const cookie = (this.profile as any).cookie || null;
 
@@ -383,7 +384,12 @@ export class BMRunner {
     }
 
     // Otherwise, use password-based login
-    await this.page.goto('https://business.facebook.com', { waitUntil: 'networkidle2' });
+    // Use bmUid to construct dashboard link if available
+    const bmUid = (this.profile as any).bmUid;
+    const targetUrl = bmUid && bmUid.trim() !== '' 
+      ? `https://business.facebook.com/latest/home?nav_ref=bm_home_redirect&business_id=${bmUid.trim()}`
+      : 'https://business.facebook.com';
+    await this.page.goto(targetUrl, { waitUntil: 'networkidle2' });
 
     // Check if already logged in
     const isLoggedIn = await this.page.evaluate(() => {
@@ -424,14 +430,28 @@ export class BMRunner {
       // Parse cookie string and convert to Puppeteer cookie format
       const cookies = this.parseCookieString(cookieString);
       
-      // Navigate to Business Manager first to set domain
-      await this.page.goto('https://business.facebook.com', { waitUntil: 'domcontentloaded' });
+      // Navigate to facebook.com first to set cookies (cookies are created from facebook.com)
+      await this.page.goto('https://www.facebook.com', { waitUntil: 'domcontentloaded' });
       
       // Set cookies
       await this.page.setCookie(...cookies);
       
-      // Reload page to apply cookies
+      // Wait for page to load and then wait 3 seconds to ensure cookies are set
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      // Reload page to ensure cookies are applied
       await this.page.reload({ waitUntil: 'networkidle2' });
+      
+      // Now navigate to the specific business dashboard if bmUid is available
+      const bmUid = (this.profile as any).bmUid;
+      if (bmUid && bmUid.trim() !== '') {
+        const targetUrl = `https://business.facebook.com/latest/home?nav_ref=bm_home_redirect&business_id=${bmUid.trim()}`;
+        await this.page.goto(targetUrl, { waitUntil: 'networkidle2' });
+      } else {
+        // Navigate to business.facebook.com if no bmUid
+        await this.page.goto('https://business.facebook.com', { waitUntil: 'networkidle2' });
+      }
       
       // Verify login
       const isLoggedIn = await this.page.evaluate(() => {
@@ -608,9 +628,32 @@ export class BMRunner {
 
   async cleanup(): Promise<void> {
     if (this.browser) {
-      await this.browser.close();
-      this.browser = null;
-      this.page = null;
+      try {
+        // Try to close all pages first
+        try {
+          const pages = await this.browser.pages();
+          for (const page of pages) {
+            try {
+              if (!page.isClosed()) {
+                await page.close();
+              }
+            } catch (e) {
+              // Ignore errors closing individual pages
+            }
+          }
+        } catch (e) {
+          // Ignore errors getting pages
+        }
+        
+        // Close browser
+        await this.browser.close();
+      } catch (error: any) {
+        // Browser might already be closed, that's okay
+        console.warn('Error during cleanup:', error);
+      } finally {
+        this.browser = null;
+        this.page = null;
+      }
     }
   }
 }

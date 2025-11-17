@@ -17,7 +17,8 @@ import { EditProfileDialog } from "./EditProfileDialog";
 interface Profile {
   id: number;
   type: "VIA" | "BM";
-  uid: string | null;
+  username: string | null;
+  bmUid?: string | null; // UID BM Trung Gian (only for BM profiles)
   proxy: string;
   status: string;
   pinned: boolean;
@@ -56,6 +57,12 @@ export function ProfileTable({ searchQuery, onSelectionChange }: ProfileTablePro
     };
     window.addEventListener('profile:created', handleProfileCreated);
     
+    // Listen for manual refresh event
+    const handleProfileRefresh = () => {
+      loadProfiles();
+    };
+    window.addEventListener('profile:refresh', handleProfileRefresh);
+    
     // Subscribe to automation events for real-time updates
     let unsubscribe: (() => void) | undefined;
     if (window.electronAPI) {
@@ -68,6 +75,7 @@ export function ProfileTable({ searchQuery, onSelectionChange }: ProfileTablePro
     
     return () => {
       window.removeEventListener('profile:created', handleProfileCreated);
+      window.removeEventListener('profile:refresh', handleProfileRefresh);
       if (unsubscribe) unsubscribe();
     };
   }, []);
@@ -95,7 +103,8 @@ export function ProfileTable({ searchQuery, onSelectionChange }: ProfileTablePro
           return {
             id: p.id,
             type: p.type === 'VIA' || p.type === 'BM' ? p.type : 'VIA',
-            uid: p.uid || null,
+            username: p.username || p.uid || null, // Support migration from uid
+            bmUid: p.bmUid || null,
             proxy: p.proxy || '',
             status: p.status || 'idle',
             pinned: p.pinned === true || p.pinned === 1,
@@ -134,7 +143,8 @@ export function ProfileTable({ searchQuery, onSelectionChange }: ProfileTablePro
 
   const filteredProfiles = sortedProfiles.filter(
     (profile) =>
-      (profile.uid || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (profile.username || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (profile.bmUid || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
       profile.proxy.toLowerCase().includes(searchQuery.toLowerCase()) ||
       profile.type.toLowerCase().includes(searchQuery.toLowerCase())
   );
@@ -167,22 +177,32 @@ export function ProfileTable({ searchQuery, onSelectionChange }: ProfileTablePro
       if (profile.status === "running") {
         const result = await api.stopProfile(id);
         if (result.success) {
-          // Small delay to ensure backend updates status
-          setTimeout(() => loadProfiles(), 300);
+          // Optimistically update UI immediately
+          setProfiles(prev => prev.map(p => 
+            p.id === id ? { ...p, status: 'idle' } : p
+          ));
+          // Then refresh from server to ensure consistency
+          setTimeout(() => loadProfiles(), 200);
         } else {
-          alert(`Error: ${result.error}`);
+          alert(`Lỗi: ${result.error}`);
         }
       } else {
         const result = await api.startProfile(id);
         if (result.success) {
-          // Small delay to ensure backend updates status
-          setTimeout(() => loadProfiles(), 300);
+          // Optimistically update UI immediately
+          setProfiles(prev => prev.map(p => 
+            p.id === id ? { ...p, status: 'running' } : p
+          ));
+          // Then refresh from server to ensure consistency
+          setTimeout(() => loadProfiles(), 200);
         } else {
-          alert(`Error: ${result.error}`);
+          alert(`Lỗi: ${result.error}`);
         }
       }
     } catch (error: any) {
-      alert(`Error: ${error.message}`);
+      alert(`Lỗi: ${error.message}`);
+      // Refresh on error to get correct state
+      loadProfiles();
     }
   };
 
@@ -263,7 +283,8 @@ export function ProfileTable({ searchQuery, onSelectionChange }: ProfileTablePro
             </TableHead>
             <TableHead>ID</TableHead>
             <TableHead>Type</TableHead>
-            <TableHead>UID</TableHead>
+            <TableHead>Username</TableHead>
+            <TableHead>BM UID</TableHead>
             <TableHead>Proxy</TableHead>
             <TableHead>User Agent</TableHead>
             <TableHead>Password</TableHead>
@@ -313,7 +334,10 @@ export function ProfileTable({ searchQuery, onSelectionChange }: ProfileTablePro
                     )}
                   </div>
                 </TableCell>
-                <TableCell>{profile.uid || 'N/A'}</TableCell>
+                <TableCell>{profile.username || 'N/A'}</TableCell>
+                <TableCell>
+                  {profile.type === 'BM' ? (profile.bmUid || 'N/A') : '-'}
+                </TableCell>
                 <TableCell className="font-mono text-xs">{profile.proxy}</TableCell>
                 <TableCell className="font-mono text-xs max-w-xs truncate" title={profile.userAgent || 'N/A'} style={{ color: "#6B7280" }}>
                   {profile.userAgent || 'N/A'}

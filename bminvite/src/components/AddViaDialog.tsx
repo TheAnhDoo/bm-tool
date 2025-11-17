@@ -38,7 +38,7 @@ export function AddViaDialog({ open, onOpenChange }: AddViaDialogProps) {
 
     setSaving(true);
     try {
-      // Parse account data (format: UID|PASS|2FA|PROXY)
+      // Parse account data (format: USERNAME|PASS|2FA|PROXY)
       const lines = accountData
         .split('\n')
         .map(line => line.trim())
@@ -54,7 +54,7 @@ export function AddViaDialog({ open, onOpenChange }: AddViaDialogProps) {
       const accounts = lines.filter(line => line.includes('|'));
       
       if (accounts.length === 0) {
-        alert("Invalid format. Expected: UID|PASS|2FA|PROXY");
+        alert("Invalid format. Expected: USERNAME|PASS|2FA|PROXY");
         setSaving(false);
         return;
       }
@@ -153,14 +153,14 @@ export function AddViaDialog({ open, onOpenChange }: AddViaDialogProps) {
               <Label htmlFor="account-data" className="text-base">Account Data</Label>
               <Textarea
                 id="account-data"
-                placeholder="Enter account data (one per line)&#10;Format: UID|PASSWORD|2FA|PROXY_IP:PROXY_PORT:PROXY_USER:PROXY_PASS&#10;&#10;Example:&#10;100123|password123|2FAKEY|123.45.67.89:8080:user:pass"
+                placeholder="Enter account data (one per line)&#10;Format: USERNAME|PASSWORD|2FA|PROXY_IP:PROXY_PORT:PROXY_USER:PROXY_PASS&#10;&#10;Example:&#10;username123|password123|2FAKEY|123.45.67.89:8080:user:pass"
                 value={accountData}
                 onChange={(e) => setAccountData(e.target.value)}
                 className="rounded-xl min-h-[200px] font-mono text-sm"
                 style={{ borderColor: "#E5E7EB" }}
               />
               <p className="text-xs" style={{ color: "#6B7280" }}>
-                Format: UID|PASSWORD|2FA|PROXY (one account per line)
+                Format: USERNAME|PASSWORD|2FA|PROXY (one account per line)
               </p>
             </div>
           </TabsContent>

@@ -16,7 +16,8 @@ import { api } from "../renderer/services/api";
 interface Profile {
   id: number;
   type: "VIA" | "BM";
-  uid: string | null;
+  username: string | null;
+  bmUid?: string | null; // UID BM Trung Gian (only for BM profiles)
   proxy: string;
   status: string;
   pinned: boolean;
@@ -33,7 +34,8 @@ interface EditProfileDialogProps {
 }
 
 export function EditProfileDialog({ open, onOpenChange, profile, onProfileUpdated }: EditProfileDialogProps) {
-  const [uid, setUid] = useState("");
+  const [username, setUsername] = useState("");
+  const [bmUid, setBmUid] = useState("");
   const [password, setPassword] = useState("");
   const [twoFAKey, setTwoFAKey] = useState("");
   const [cookie, setCookie] = useState("");
@@ -42,7 +44,8 @@ export function EditProfileDialog({ open, onOpenChange, profile, onProfileUpdate
   // Load profile data when dialog opens
   useEffect(() => {
     if (open && profile) {
-      setUid(profile.uid || "");
+      setUsername(profile.username || "");
+      setBmUid(profile.bmUid || "");
       // Don't load password/2FA/cookie values for security, but we'll show if they exist
       setPassword("");
       setTwoFAKey("");
@@ -55,10 +58,15 @@ export function EditProfileDialog({ open, onOpenChange, profile, onProfileUpdate
 
     setSaving(true);
     try {
-      const updateData: { uid?: string; password?: string; twoFAKey?: string; cookie?: string } = {};
+      const updateData: { username?: string; bmUid?: string; password?: string; twoFAKey?: string; cookie?: string } = {};
       
-      if (uid !== profile.uid) {
-        updateData.uid = uid || undefined;
+      if (username !== profile.username) {
+        updateData.username = username || undefined;
+      }
+      
+      // Only update bmUid for BM profiles
+      if (profile.type === 'BM' && bmUid !== (profile.bmUid || '')) {
+        updateData.bmUid = bmUid || undefined;
       }
       
       // Only update password/2FA/cookie if provided (not empty)
@@ -104,7 +112,8 @@ export function EditProfileDialog({ open, onOpenChange, profile, onProfileUpdate
     onOpenChange(false);
     // Reset form
     if (profile) {
-      setUid(profile.uid || "");
+      setUsername(profile.username || "");
+      setBmUid(profile.bmUid || "");
       setPassword("");
       setTwoFAKey("");
       setCookie("");
@@ -115,8 +124,8 @@ export function EditProfileDialog({ open, onOpenChange, profile, onProfileUpdate
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl rounded-2xl" style={{ border: "1px solid #E5E7EB" }}>
-        <DialogHeader className="pb-3">
+      <DialogContent className="max-w-2xl rounded-2xl max-h-[90vh] flex flex-col" style={{ border: "1px solid #E5E7EB" }}>
+        <DialogHeader className="pb-3 flex-shrink-0">
           <DialogTitle className="flex items-center gap-3 text-lg">
             <div
               className="w-10 h-10 rounded-xl flex items-center justify-center"
@@ -128,7 +137,7 @@ export function EditProfileDialog({ open, onOpenChange, profile, onProfileUpdate
           </DialogTitle>
         </DialogHeader>
 
-        <div className="space-y-5 py-4">
+        <div className="space-y-5 py-4 overflow-y-auto flex-1 min-h-0">
           {/* Profile Type (read-only) */}
           <div className="space-y-2">
             <Label className="text-base">Profile Type</Label>
@@ -154,18 +163,36 @@ export function EditProfileDialog({ open, onOpenChange, profile, onProfileUpdate
             </p>
           </div>
 
-          {/* UID */}
+          {/* Username */}
           <div className="space-y-2">
-            <Label htmlFor="edit-uid" className="text-base">UID</Label>
+            <Label htmlFor="edit-username" className="text-base">Username</Label>
             <Input
-              id="edit-uid"
-              placeholder="Facebook UID"
-              value={uid}
-              onChange={(e) => setUid(e.target.value)}
+              id="edit-username"
+              placeholder="Facebook Username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
               className="rounded-xl h-11"
               style={{ borderColor: "#E5E7EB" }}
             />
           </div>
+
+          {/* BM UID (only for BM profiles) */}
+          {profile.type === 'BM' && (
+            <div className="space-y-2">
+              <Label htmlFor="edit-bm-uid" className="text-base">UID BM Trung Gian</Label>
+              <Input
+                id="edit-bm-uid"
+                placeholder="UID BM Trung Gian (business_id)"
+                value={bmUid}
+                onChange={(e) => setBmUid(e.target.value)}
+                className="rounded-xl h-11"
+                style={{ borderColor: "#E5E7EB" }}
+              />
+              <p className="text-xs" style={{ color: "#6B7280" }}>
+                UID này sẽ được dùng để tạo link dashboard BM: https://business.facebook.com/latest/home?nav_ref=bm_home_redirect&business_id={bmUid || 'YOUR_BM_UID'}
+              </p>
+            </div>
+          )}
 
           {/* Password */}
           <div className="space-y-2">
@@ -212,8 +239,8 @@ export function EditProfileDialog({ open, onOpenChange, profile, onProfileUpdate
               placeholder={profile.cookie ? "Paste new Facebook cookie (current cookie exists)" : "Paste Facebook cookie string (currently not set)"}
               value={cookie}
               onChange={(e) => setCookie(e.target.value)}
-              className="rounded-xl min-h-[100px] font-mono text-xs"
-              style={{ borderColor: "#E5E7EB" }}
+              className="rounded-xl min-h-[100px] max-h-[200px] font-mono text-xs overflow-y-auto"
+              style={{ borderColor: "#E5E7EB", resize: "vertical" }}
             />
             <p className="text-xs" style={{ color: "#6B7280" }}>
               {profile.cookie 
@@ -223,7 +250,7 @@ export function EditProfileDialog({ open, onOpenChange, profile, onProfileUpdate
           </div>
         </div>
 
-        <DialogFooter className="pt-4">
+        <DialogFooter className="pt-4 flex-shrink-0 border-t" style={{ borderColor: "#E5E7EB" }}>
           <Button
             type="button"
             variant="outline"

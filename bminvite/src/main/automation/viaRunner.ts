@@ -369,7 +369,8 @@ export class ViaRunner {
       throw new Error('Page not initialized');
     }
 
-    const uid = this.profile.uid;
+    // Use username (new) or uid (old) for backward compatibility
+    const uid = (this.profile as any).username || this.profile.uid;
     const password = this.profile.password || null;
     const cookie = (this.profile as any).cookie || null;
 
@@ -730,9 +731,32 @@ export class ViaRunner {
 
   async cleanup(): Promise<void> {
     if (this.browser) {
-      await this.browser.close();
-      this.browser = null;
-      this.page = null;
+      try {
+        // Try to close all pages first
+        try {
+          const pages = await this.browser.pages();
+          for (const page of pages) {
+            try {
+              if (!page.isClosed()) {
+                await page.close();
+              }
+            } catch (e) {
+              // Ignore errors closing individual pages
+            }
+          }
+        } catch (e) {
+          // Ignore errors getting pages
+        }
+        
+        // Close browser
+        await this.browser.close();
+      } catch (error: any) {
+        // Browser might already be closed, that's okay
+        console.warn('Error during cleanup:', error);
+      } finally {
+        this.browser = null;
+        this.page = null;
+      }
     }
   }
 }

@@ -25,7 +25,7 @@ export function AddLinkInviteDialog({ open, onOpenChange }: AddLinkInviteDialogP
 
   const handleSave = async () => {
     if (!inviteLinks.trim()) {
-      alert("Please enter at least one invite link");
+      alert("Vui lòng nhập ít nhất một link invite");
       return;
     }
 
@@ -34,10 +34,13 @@ export function AddLinkInviteDialog({ open, onOpenChange }: AddLinkInviteDialogP
       const links = inviteLinks
         .split('\n')
         .map(line => line.trim())
-        .filter(line => line && line.startsWith('http'));
+        .filter(line => {
+          const trimmed = line.trim();
+          return trimmed && (trimmed.startsWith('http://') || trimmed.startsWith('https://'));
+        });
 
       if (links.length === 0) {
-        alert("No valid invite links found");
+        alert("Không tìm thấy link invite hợp lệ. Vui lòng nhập link bắt đầu bằng http:// hoặc https://");
         setSaving(false);
         return;
       }
@@ -45,16 +48,17 @@ export function AddLinkInviteDialog({ open, onOpenChange }: AddLinkInviteDialogP
       const result = await api.createInvites({ links, notes: notes || undefined });
 
       if (result.success) {
-        alert(`Created ${result.data?.count || 0} invites successfully!`);
+        alert(`Đã tạo ${result.data?.count || 0} invite thành công!`);
         onOpenChange(false);
         setInviteLinks("");
         setNotes("");
         window.dispatchEvent(new Event('invite:created'));
       } else {
-        alert(`Error: ${result.error}`);
+        alert(`Lỗi: ${result.error || 'Không thể tạo invite'}`);
       }
     } catch (error: any) {
-      alert(`Error: ${error.message}`);
+      console.error('Error creating invites:', error);
+      alert(`Lỗi: ${error.message || 'Đã xảy ra lỗi khi tạo invite'}`);
     } finally {
       setSaving(false);
     }

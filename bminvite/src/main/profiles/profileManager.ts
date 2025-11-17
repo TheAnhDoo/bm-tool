@@ -56,7 +56,8 @@ interface CreateProfileOptions {
   type: 'VIA' | 'BM';
   proxy: string; // Format: ip:port:user:pass
   fingerprint?: string;
-  uid?: string;
+  username?: string; // Username for both VIA and BM
+  bmUid?: string; // UID BM Trung Gian (only for BM profiles)
   password?: string;
   twoFAKey?: string;
   cookie?: string; // Facebook cookies for login
@@ -84,7 +85,7 @@ export class ProfileManager {
   }
 
   async createProfile(options: CreateProfileOptions) {
-    const { type, proxy, fingerprint, uid, password, twoFAKey, cookie, headless } = options;
+    const { type, proxy, fingerprint, username, bmUid, password, twoFAKey, cookie, headless } = options;
 
     // Validate proxy format
     this.validateProxy(proxy);
@@ -114,22 +115,54 @@ export class ProfileManager {
     const chromeProfilePath = join(getChromeProfilesPath(), `profile-${profileId}`);
     mkdirSync(chromeProfilePath, { recursive: true });
 
+    // Ensure bmUid column exists (needed for BM profiles)
+    try {
+      const columns = await this.prisma.$queryRaw<Array<{ name: string }>>`
+        PRAGMA table_info(Profile)
+      `;
+      const columnNames = columns.map(col => col.name);
+      if (!columnNames.includes('bmUid')) {
+        logger.info('Adding bmUid column to Profile table...');
+        await this.prisma.$executeRawUnsafe(`ALTER TABLE "Profile" ADD COLUMN "bmUid" TEXT`);
+        logger.info('bmUid column added successfully');
+      }
+    } catch (e: any) {
+      logger.warn('Failed to check/add bmUid column:', e);
+      // Continue anyway - column might already exist
+    }
+
     // Store sensitive data in plain text (no encryption)
-    // Create profile in database
-    const profile = await this.prisma.profile.create({
-      data: {
-        type,
-        uid,
-        password: password || null,
-        twoFAKey: twoFAKey || null,
-        cookie: cookie || null,
-        proxy,
-        chromeProfile: chromeProfilePath,
-        deviceConfig: JSON.stringify(deviceConfig),
-        pinned: type === 'BM', // BM profiles are pinned by default
-        status: 'idle',
-      } as any, // Type assertion needed until Prisma client is regenerated
-    });
+    // Create profile in database using raw SQL to support bmUid field
+    await this.prisma.$executeRawUnsafe(
+      `INSERT INTO "Profile" (
+        "type", "username", "bmUid", "password", "twoFAKey", "cookie", 
+        "proxy", "chromeProfile", "deviceConfig", "pinned", "status", 
+        "createdAt", "updatedAt"
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      type,
+      username || null,
+      type === 'BM' ? (bmUid || null) : null, // Only set bmUid for BM profiles
+      password || null,
+      twoFAKey || null,
+      cookie || null,
+      proxy,
+      chromeProfilePath,
+      JSON.stringify(deviceConfig),
+      type === 'BM' ? 1 : 0, // BM profiles are pinned by default
+      'idle'
+    );
+    
+    // Fetch the created profile using raw query
+    const profileRaw = await this.prisma.$queryRawUnsafe<Array<any>>(
+      `SELECT * FROM "Profile" WHERE "chromeProfile" = ? ORDER BY "id" DESC LIMIT 1`,
+      chromeProfilePath
+    );
+    
+    if (!profileRaw || profileRaw.length === 0) {
+      throw new Error('Failed to create profile');
+    }
+    
+    const profile = profileRaw[0];
 
     logger.info(`Created profile ${profile.id} (${type})`);
     return profile;
@@ -147,12 +180,12 @@ export class ProfileManager {
           continue;
         }
 
-        const [uid, password, twoFA, proxy] = parts;
+        const [username, password, twoFA, proxy] = parts;
 
         const profile = await this.createProfile({
           type,
           proxy: proxy.trim(),
-          uid: uid.trim() || undefined,
+          username: username.trim() || undefined,
           password: password.trim() || undefined,
           twoFAKey: twoFA.trim() || undefined,
         });
@@ -167,13 +200,17 @@ export class ProfileManager {
   }
 
   async startProfile(profileId: number) {
-    const profile = await this.prisma.profile.findUnique({
-      where: { id: profileId },
-    });
-
-    if (!profile) {
+    // Use raw query to get both uid and username for backward compatibility
+    const profileRaw = await this.prisma.$queryRawUnsafe<Array<any>>(
+      `SELECT * FROM "Profile" WHERE id = ? LIMIT 1`,
+      profileId
+    );
+    
+    if (!profileRaw || profileRaw.length === 0) {
       throw new Error(`Profile ${profileId} not found`);
     }
+    
+    const profile = profileRaw[0];
 
     if (profile.status === 'running') {
       logger.warn(`Profile ${profileId} is already running`);
@@ -191,8 +228,10 @@ export class ProfileManager {
       throw new Error(`Profile ${profileId} (${profile.type}) proxy format is invalid. Expected: ip:port:username:password`);
     }
 
-    if (!profile.uid || profile.uid.trim() === '') {
-      throw new Error(`Profile ${profileId} (${profile.type}) must have a UID configured before opening`);
+    // Check for username (new) or uid (old) for backward compatibility
+    const username = profile.username || profile.uid;
+    if (!username || username.trim() === '') {
+      throw new Error(`Profile ${profileId} (${profile.type}) must have a username configured before opening`);
     }
 
     // Check if profile has either cookie or password (plain text, no decryption needed)
@@ -242,13 +281,17 @@ export class ProfileManager {
   }
 
   private async openBrowserProfile(profileId: number): Promise<void> {
-    const profile = await this.prisma.profile.findUnique({
-      where: { id: profileId },
-    });
-
-    if (!profile) {
+    // Use raw query to get both uid and username for backward compatibility
+    const profileRaw = await this.prisma.$queryRawUnsafe<Array<any>>(
+      `SELECT * FROM "Profile" WHERE id = ? LIMIT 1`,
+      profileId
+    );
+    
+    if (!profileRaw || profileRaw.length === 0) {
       throw new Error(`Profile ${profileId} not found`);
     }
+    
+    const profile = profileRaw[0];
 
     // Calculate window position and size for auto-arrangement
     const windowConfig = this.calculateWindowPosition(this.browserWindowCount);
@@ -269,7 +312,23 @@ export class ProfileManager {
     await runner.initialize(windowConfig);
     
     // Navigate to Facebook but don't login or run automation
-    const targetUrl = profile.type === 'BM' ? 'https://business.facebook.com' : 'https://www.facebook.com';
+    // For BM profiles, use bmUid to construct dashboard link if available
+    // Determine base URL and final target URL
+    // For BM profiles, navigate to facebook.com first to set cookies, then to business.facebook.com
+    let baseUrl: string;
+    let targetUrl: string;
+    if (profile.type === 'BM') {
+      baseUrl = 'https://www.facebook.com'; // Navigate to facebook.com first to set cookies
+      const bmUid = (profile as any).bmUid;
+      if (bmUid && bmUid.trim() !== '') {
+        targetUrl = `https://business.facebook.com/latest/home?nav_ref=bm_home_redirect&business_id=${bmUid.trim()}`;
+      } else {
+        targetUrl = 'https://business.facebook.com';
+      }
+    } else {
+      baseUrl = 'https://www.facebook.com';
+      targetUrl = baseUrl;
+    }
     
     // Access page via type assertion (runners have private page property)
     const runnerAny = runner as any;
@@ -286,8 +345,8 @@ export class ProfileManager {
             const cookies = parseCookieString(cookie, targetDomain);
             
             if (cookies.length > 0) {
-              // Navigate to the target URL first to establish context
-              await runnerAny.page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+              // Navigate to base URL first to establish context and set cookies
+              await runnerAny.page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
               
               // Set cookies with specific domain
               await runnerAny.page.setCookie(...cookies);
@@ -307,8 +366,17 @@ export class ProfileManager {
               logger.info(`Profile ${profileId}: Set ${cookies.length} cookies successfully for ${targetDomain}`);
               logger.debug(`Profile ${profileId}: Cookie names: ${cookies.map(c => c.name).join(', ')}`);
               
-              // Reload page to apply cookies and check login status
+              // Wait for page to load and then wait 3 seconds to ensure cookies are set
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              await new Promise(resolve => setTimeout(resolve, 3000));
+              
+              // Reload page to ensure cookies are applied
               await runnerAny.page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
+              
+              // Now navigate to the target URL (with business_id if available)
+              if (targetUrl !== baseUrl) {
+                await runnerAny.page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+              }
               
               // Verify if logged in
               const isLoggedIn = await runnerAny.page.evaluate(() => {
@@ -425,23 +493,65 @@ export class ProfileManager {
     const openBrowser = this.openBrowsers.get(profileId);
     if (openBrowser) {
       try {
-        await openBrowser.cleanup();
+        // Access browser via type assertion
+        const runnerAny = openBrowser as any;
+        if (runnerAny.browser) {
+          try {
+            // Try to close all pages first
+            const pages = await runnerAny.browser.pages();
+            for (const page of pages) {
+              try {
+                await page.close();
+              } catch (e) {
+                // Ignore errors closing individual pages
+              }
+            }
+          } catch (e) {
+            // Ignore errors getting pages
+          }
+          
+          // Close browser
+          await runnerAny.browser.close();
+        }
+        
+        // Call cleanup method if available
+        if (typeof openBrowser.cleanup === 'function') {
+          try {
+            await openBrowser.cleanup();
+          } catch (e) {
+            // Ignore cleanup errors, browser might already be closed
+          }
+        }
+        
         this.openBrowsers.delete(profileId);
         this.browserWindowCount = Math.max(0, this.browserWindowCount - 1);
         logger.info(`Closed browser for profile ${profileId}`);
       } catch (error: any) {
         logger.error(`Failed to close browser for profile ${profileId}:`, error);
+        // Still remove from map even if cleanup failed
+        this.openBrowsers.delete(profileId);
+        this.browserWindowCount = Math.max(0, this.browserWindowCount - 1);
       }
     }
 
     // Remove from automation queue (in case it was added)
-    await this.getQueue().removeProfileJob(profileId);
+    try {
+      await this.getQueue().removeProfileJob(profileId);
+    } catch (error: any) {
+      logger.warn(`Failed to remove profile ${profileId} from queue:`, error);
+    }
 
-    // Update status to idle (not stopped, since stopped implies error)
-    await this.prisma.profile.update({
-      where: { id: profileId },
-      data: { status: 'idle' },
-    });
+    // Always update status to idle, even if cleanup failed
+    try {
+      await this.prisma.profile.update({
+        where: { id: profileId },
+        data: { status: 'idle' },
+      });
+      logger.info(`Updated profile ${profileId} status to idle`);
+    } catch (error: any) {
+      logger.error(`Failed to update profile ${profileId} status:`, error);
+      throw error; // Re-throw if status update fails
+    }
 
     logger.info(`Stopped profile ${profileId}`);
   }

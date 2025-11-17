@@ -9,7 +9,7 @@ import { StatusBadge } from "./StatusBadge";
 
 interface Via {
   id: number;
-  uid: string | null;
+  username: string | null;
   proxy: string;
   status: string;
   createdAt: string | Date;
@@ -57,7 +57,7 @@ export function ViaDashboard() {
       if (result.success && result.data?.profiles) {
         const mappedVias: Via[] = result.data.profiles.map((p: any) => ({
           id: p.id,
-          uid: p.uid || null,
+          username: p.username || p.uid || null, // Support migration from uid
           proxy: p.proxy || '',
           status: p.status || 'idle',
           createdAt: p.createdAt,
@@ -77,7 +77,7 @@ export function ViaDashboard() {
 
   const filteredVias = vias.filter(
     (via) =>
-      (via.uid || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (via.username || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
       via.proxy.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
@@ -162,7 +162,7 @@ export function ViaDashboard() {
                     />
                   </TableHead>
                   <TableHead>ID</TableHead>
-                  <TableHead>UID</TableHead>
+                  <TableHead>Username</TableHead>
                   <TableHead>Proxy</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Password</TableHead>
@@ -194,7 +194,7 @@ export function ViaDashboard() {
                         />
                       </TableCell>
                       <TableCell>{via.id}</TableCell>
-                      <TableCell>{via.uid || 'N/A'}</TableCell>
+                      <TableCell>{via.username || 'N/A'}</TableCell>
                       <TableCell className="font-mono text-xs max-w-xs truncate" title={via.proxy}>
                         {via.proxy}
                       </TableCell>

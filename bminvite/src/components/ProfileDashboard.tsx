@@ -9,6 +9,7 @@ import {
   Play,
   Square,
   Copy,
+  RefreshCw,
 } from "lucide-react";
 import { ProfileTable } from "./ProfileTable";
 import { AddProfileDialog } from "./AddProfileDialog";
@@ -25,14 +26,15 @@ export function ProfileDashboard() {
   const [isAddLinkInviteOpen, setIsAddLinkInviteOpen] = useState(false);
   const [selectedRows, setSelectedRows] = useState<number[]>([]);
   const [loading, setLoading] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   const handleRunAll = async () => {
     setLoading(true);
     try {
-      // Trigger full automation workflow with all pending invites
-      const result = await api.runAutomation({});
+      // Open all profiles (just open browser, don't run automation)
+      const result = await api.startProfiles();
       if (result.success) {
-        alert("Automation started successfully - processing all pending invites");
+        alert("Đã mở tất cả profiles");
       } else {
         alert(`Error: ${result.error}`);
       }
@@ -46,17 +48,19 @@ export function ProfileDashboard() {
   const handleStopAll = async () => {
     setLoading(true);
     try {
-      // Stop automation and all running profiles
-      const autoResult = await api.stopAutomation();
-      const profilesResult = await api.stopProfiles();
-      
-      if (autoResult.success && profilesResult.success) {
-        alert("All automation and profiles stopped successfully");
+      // Stop all running profiles
+      const result = await api.stopProfiles();
+      if (result.success) {
+        alert("Đã dừng tất cả profiles");
+        // Refresh profile list to update status
+        setTimeout(() => {
+          window.dispatchEvent(new Event('profiles:stopped'));
+        }, 200);
       } else {
-        alert(`Error: ${autoResult.error || profilesResult.error}`);
+        alert(`Lỗi: ${result.error}`);
       }
     } catch (error: any) {
-      alert(`Error: ${error.message}`);
+      alert(`Lỗi: ${error.message}`);
     } finally {
       setLoading(false);
     }
@@ -66,28 +70,10 @@ export function ProfileDashboard() {
     if (selectedRows.length === 0) return;
     setLoading(true);
     try {
-      // Get selected profiles to determine which are VIA
-      const profilesResult = await api.listProfiles();
-      if (!profilesResult.success || !profilesResult.data?.profiles) {
-        alert("Error: Could not load profiles");
-        return;
-      }
-      
-      const selectedProfiles = profilesResult.data.profiles.filter((p: any) => 
-        selectedRows.includes(p.id)
-      );
-      
-      const viaIds = selectedProfiles
-        .filter((p: any) => p.type === 'VIA')
-        .map((p: any) => p.id);
-      
-      const bmProfiles = selectedProfiles.filter((p: any) => p.type === 'BM');
-      const bmId = bmProfiles.length > 0 ? bmProfiles[0].id : undefined;
-      
-      // Trigger automation with selected VIA profiles
-      const result = await api.runAutomation({ viaIds, bmId });
+      // Open selected profiles (just open browser, don't run automation)
+      const result = await api.startProfiles(selectedRows);
       if (result.success) {
-        alert(`Automation started with ${viaIds.length} selected VIA profile(s)`);
+        alert(`Đã mở ${selectedRows.length} profile(s) đã chọn`);
       } else {
         alert(`Error: ${result.error}`);
       }
@@ -102,14 +88,19 @@ export function ProfileDashboard() {
     if (selectedRows.length === 0) return;
     setLoading(true);
     try {
+      // Stop selected profiles
       const result = await api.stopProfiles(selectedRows);
       if (result.success) {
-        alert(`Selected profiles stopped successfully`);
+        alert(`Đã dừng ${selectedRows.length} profile(s) đã chọn`);
+        // Refresh profile list to update status
+        setTimeout(() => {
+          window.dispatchEvent(new Event('profiles:stopped'));
+        }, 200);
       } else {
-        alert(`Error: ${result.error}`);
+        alert(`Lỗi: ${result.error}`);
       }
     } catch (error: any) {
-      alert(`Error: ${error.message}`);
+      alert(`Lỗi: ${error.message}`);
     } finally {
       setLoading(false);
     }
@@ -146,7 +137,8 @@ export function ProfileDashboard() {
 
         return `Profile ID: ${p.id}
 Type: ${p.type}
-UID: ${p.uid || 'N/A'}
+Username: ${p.username || p.uid || 'N/A'}
+${p.type === 'BM' && p.bmUid ? `BM UID: ${p.bmUid}` : ''}
 Password: ${p.password || 'N/A'}
 2FA Key: ${p.twoFAKey || 'N/A'}
 Cookie: ${p.cookie || 'N/A'}
@@ -207,6 +199,21 @@ Created At: ${p.createdAt}
       alert(`Error: ${error.message}`);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      // Dispatch event to trigger ProfileTable refresh
+      window.dispatchEvent(new Event('profile:refresh'));
+      // Small delay to show loading state and ensure refresh completes
+      setTimeout(() => {
+        setIsRefreshing(false);
+      }, 300);
+    } catch (error: any) {
+      console.error('Error refreshing profiles:', error);
+      setIsRefreshing(false);
     }
   };
 
@@ -296,6 +303,17 @@ Created At: ${p.createdAt}
           >
             <Download size={18} />
             Export
+          </Button>
+          <Button
+            variant="outline"
+            className="rounded-xl gap-2"
+            style={{ borderColor: "#E5E7EB" }}
+            onClick={handleRefresh}
+            disabled={isRefreshing || loading}
+            title="Refresh profile status"
+          >
+            <RefreshCw size={18} className={isRefreshing ? "animate-spin" : ""} />
+            Refresh
           </Button>
           <Button
             className="rounded-xl gap-2"

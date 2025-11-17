@@ -42,7 +42,8 @@ export function setupIPCHandlers(mainWindow: BrowserWindow | null) {
     type: 'VIA' | 'BM';
     proxy: string;
     fingerprint?: string;
-    uid?: string;
+    username?: string;
+    bmUid?: string;
     password?: string;
     twoFAKey?: string;
     headless?: boolean;
@@ -104,9 +105,12 @@ export function setupIPCHandlers(mainWindow: BrowserWindow | null) {
 
   // PUT /api/profiles/:id -> profiles:update
   ipcMain.handle('profiles:update', async (_event, id: number, data: {
-    uid?: string;
+    username?: string;
+    bmUid?: string;
     password?: string;
     twoFAKey?: string;
+    cookie?: string;
+    deviceConfig?: string;
   }) => {
     try {
       const response = await makeRequest(`/api/profiles/${id}`, 'PUT', data);
@@ -343,13 +347,29 @@ export function setupIPCHandlers(mainWindow: BrowserWindow | null) {
   ipcMain.handle('dashboard:stats', async () => {
     try {
       const prisma = getPrismaClient();
-      const [totalProfiles, viaProfiles, bmProfiles, totalInvites, runningProfiles] = await Promise.all([
-        prisma.profile.count(),
-        prisma.profile.count({ where: { type: 'VIA' } }),
-        prisma.profile.count({ where: { type: 'BM' } }),
-        prisma.invite.count(),
-        prisma.profile.count({ where: { status: 'running' } }),
+      
+      // Use raw queries to handle cases where tables might not exist
+      const [totalProfilesRaw, viaProfilesRaw, bmProfilesRaw, runningProfilesRaw] = await Promise.all([
+        prisma.$queryRawUnsafe<Array<{ count: number }>>(`SELECT COUNT(*) as count FROM "Profile"`),
+        prisma.$queryRawUnsafe<Array<{ count: number }>>(`SELECT COUNT(*) as count FROM "Profile" WHERE "type" = 'VIA'`),
+        prisma.$queryRawUnsafe<Array<{ count: number }>>(`SELECT COUNT(*) as count FROM "Profile" WHERE "type" = 'BM'`),
+        prisma.$queryRawUnsafe<Array<{ count: number }>>(`SELECT COUNT(*) as count FROM "Profile" WHERE "status" = 'running'`),
       ]);
+
+      // Check if Invite table exists before querying
+      let totalInvites = 0;
+      try {
+        const inviteCountRaw = await prisma.$queryRawUnsafe<Array<{ count: number }>>(`SELECT COUNT(*) as count FROM "Invite"`);
+        totalInvites = inviteCountRaw[0]?.count || 0;
+      } catch (e) {
+        // Table doesn't exist, use 0
+        logger.debug('Invite table does not exist yet');
+      }
+
+      const totalProfiles = totalProfilesRaw[0]?.count || 0;
+      const viaProfiles = viaProfilesRaw[0]?.count || 0;
+      const bmProfiles = bmProfilesRaw[0]?.count || 0;
+      const runningProfiles = runningProfilesRaw[0]?.count || 0;
 
       return {
         success: true,
@@ -374,16 +394,8 @@ export function setupIPCHandlers(mainWindow: BrowserWindow | null) {
   // GET /api/reports -> reports:list
   ipcMain.handle('reports:list', async () => {
     try {
-      const prisma = getPrismaClient();
-      const invites = await prisma.invite.findMany({
-        include: {
-          viaProfile: { select: { id: true, uid: true } },
-          bmProfile: { select: { id: true, uid: true } },
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-
-      return { success: true, data: { reports: invites } };
+      const response = await makeRequest('/api/reports', 'GET');
+      return { success: true, data: response };
     } catch (error: any) {
       logger.error('reports:list failed:', error);
       return { success: false, error: error.message };
@@ -396,20 +408,21 @@ export function setupIPCHandlers(mainWindow: BrowserWindow | null) {
       const prisma = getPrismaClient();
       const invites = await prisma.invite.findMany({
         include: {
-          viaProfile: { select: { uid: true } },
-          bmProfile: { select: { uid: true } },
+          viaProfile: { select: { username: true } },
+          bmProfile: { select: { username: true, bmUid: true } },
         },
       });
 
       if (format === 'csv') {
         const csv = [
-          'id,link,status,viaUid,bmUid,adAccountId,result,createdAt,completedAt',
+          'id,link,status,viaUsername,bmUsername,bmUid,adAccountId,result,createdAt,completedAt',
           ...invites.map(i => [
             i.id,
             i.link,
             i.status,
-            i.viaProfile?.uid || '',
-            i.bmProfile?.uid || '',
+            i.viaProfile?.username || '',
+            i.bmProfile?.username || '',
+            (i.bmProfile as any)?.bmUid || '',
             i.adAccountId || '',
             i.result || '',
             i.createdAt.toISOString(),

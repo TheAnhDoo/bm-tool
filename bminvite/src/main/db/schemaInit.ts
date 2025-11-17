@@ -32,18 +32,39 @@ export async function initializeSchema(databaseUrl?: string): Promise<void> {
     if (tables.length === 3) {
       logger.info('Database tables already exist');
       
-      // Check if cookie column exists in Profile table, add it if missing
+      // Check and migrate columns in Profile table
       const columns = await prisma.$queryRaw<Array<{ name: string }>>`
         PRAGMA table_info(Profile)
       `;
       
-      const hasCookieColumn = columns.some(col => col.name === 'cookie');
-      if (!hasCookieColumn) {
+      const columnNames = columns.map(col => col.name);
+      
+      // Migrate uid to username if needed
+      if (columnNames.includes('uid') && !columnNames.includes('username')) {
+        logger.info('Migrating uid column to username...');
+        await prisma.$executeRawUnsafe(`
+          ALTER TABLE "Profile" ADD COLUMN "username" TEXT;
+          UPDATE "Profile" SET "username" = "uid" WHERE "uid" IS NOT NULL;
+        `);
+        logger.info('Migrated uid to username successfully');
+      }
+      
+      // Add cookie column if missing
+      if (!columnNames.includes('cookie')) {
         logger.info('Adding cookie column to Profile table...');
         await prisma.$executeRawUnsafe(`
           ALTER TABLE "Profile" ADD COLUMN "cookie" TEXT;
         `);
         logger.info('Cookie column added successfully');
+      }
+      
+      // Add bmUid column if missing
+      if (!columnNames.includes('bmUid')) {
+        logger.info('Adding bmUid column to Profile table...');
+        await prisma.$executeRawUnsafe(`
+          ALTER TABLE "Profile" ADD COLUMN "bmUid" TEXT;
+        `);
+        logger.info('bmUid column added successfully');
       }
       
       return;
@@ -56,7 +77,8 @@ export async function initializeSchema(databaseUrl?: string): Promise<void> {
       CREATE TABLE IF NOT EXISTS "Profile" (
         "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
         "type" TEXT NOT NULL,
-        "uid" TEXT,
+        "username" TEXT,
+        "bmUid" TEXT,
         "password" TEXT,
         "twoFAKey" TEXT,
         "cookie" TEXT,

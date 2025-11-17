@@ -9,7 +9,8 @@ import { StatusBadge } from "./StatusBadge";
 
 interface BMTrungGian {
   id: number;
-  uid: string | null;
+  username: string | null;
+  bmUid: string | null; // UID BM Trung Gian
   proxy: string;
   status: string;
   pinned: boolean;
@@ -58,7 +59,8 @@ export function BMTrungGianDashboard() {
       if (result.success && result.data?.profiles) {
         const mappedBMs: BMTrungGian[] = result.data.profiles.map((p: any) => ({
           id: p.id,
-          uid: p.uid || null,
+          username: p.username || p.uid || null, // Support migration from uid
+          bmUid: p.bmUid || null,
           proxy: p.proxy || '',
           status: p.status || 'idle',
           pinned: p.pinned === true || p.pinned === 1,
@@ -79,7 +81,8 @@ export function BMTrungGianDashboard() {
 
   const filteredBMs = bms.filter(
     (bm) =>
-      (bm.uid || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (bm.username || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (bm.bmUid || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
       bm.proxy.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
@@ -164,7 +167,8 @@ export function BMTrungGianDashboard() {
                     />
                   </TableHead>
                   <TableHead>ID</TableHead>
-                  <TableHead>UID</TableHead>
+                  <TableHead>Username</TableHead>
+                  <TableHead>BM UID</TableHead>
                   <TableHead>Proxy</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Pinned</TableHead>
@@ -177,7 +181,7 @@ export function BMTrungGianDashboard() {
               <TableBody>
                 {filteredBMs.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={10} className="text-center py-8 text-gray-500">
+                    <TableCell colSpan={11} className="text-center py-8 text-gray-500">
                       Không có BM Trung Gian profile nào
                     </TableCell>
                   </TableRow>
@@ -203,7 +207,8 @@ export function BMTrungGianDashboard() {
                         />
                       </TableCell>
                       <TableCell>{bm.id}</TableCell>
-                      <TableCell>{bm.uid || 'N/A'}</TableCell>
+                      <TableCell>{bm.username || 'N/A'}</TableCell>
+                      <TableCell>{bm.bmUid || 'N/A'}</TableCell>
                       <TableCell className="font-mono text-xs max-w-xs truncate" title={bm.proxy}>
                         {bm.proxy}
                       </TableCell>

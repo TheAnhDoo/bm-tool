@@ -13,7 +13,8 @@ datasource db {
 model Profile {
   id             Int      @id @default(autoincrement())
   type           String   // "BM" | "VIA"
-  uid            String?
+  username       String?  // Username for both VIA and BM
+  bmUid          String?  // UID BM Trung Gian (only for BM profiles) - used for business_id in dashboard link
   password       String?  // Encrypted
   twoFAKey       String?  // Encrypted
   cookie         String?  // Encrypted - Facebook cookies for login

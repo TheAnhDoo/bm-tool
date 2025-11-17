@@ -8,7 +8,8 @@ interface CreateProfileBody {
   type: 'VIA' | 'BM';
   proxy: string;
   fingerprint?: string;
-  uid?: string;
+  username?: string; // Username for both VIA and BM
+  bmUid?: string; // UID BM Trung Gian (only for BM profiles)
   password?: string;
   twoFAKey?: string;
   cookie?: string;
@@ -16,7 +17,8 @@ interface CreateProfileBody {
 }
 
 interface UpdateProfileBody {
-  uid?: string;
+  username?: string;
+  bmUid?: string; // UID BM Trung Gian (only for BM profiles)
   password?: string;
   twoFAKey?: string;
   cookie?: string;
@@ -40,30 +42,35 @@ export async function registerProfileRoutes(fastify: FastifyInstance) {
   fastify.get('/', async (request: FastifyRequest<{ Querystring: { type?: string; search?: string } }>, reply: FastifyReply) => {
     try {
       const { type, search } = request.query;
-      const where: any = {};
-
+      
+      // Build WHERE clause using raw SQL to support username and bmUid fields
+      let whereClause = '1=1';
+      const params: any[] = [];
+      
       if (type) {
-        where.type = type.toUpperCase();
+        whereClause += ' AND "type" = ?';
+        params.push(type.toUpperCase());
       }
-
+      
       if (search) {
-        where.OR = [
-          { uid: { contains: search } },
-          { proxy: { contains: search } },
-        ];
+        whereClause += ' AND ("username" LIKE ? OR "bmUid" LIKE ? OR "proxy" LIKE ? OR "uid" LIKE ?)';
+        const searchPattern = `%${search}%`;
+        params.push(searchPattern, searchPattern, searchPattern, searchPattern);
       }
-
-      const profiles = await prisma.profile.findMany({
-        where,
-        orderBy: [{ pinned: 'desc' }, { createdAt: 'desc' }],
-      });
+      
+      const profilesRaw = await prisma.$queryRawUnsafe<Array<any>>(
+        `SELECT * FROM "Profile" WHERE ${whereClause} ORDER BY "pinned" DESC, "createdAt" DESC`,
+        ...params
+      );
 
       // Return profiles with plain text data (no decryption needed)
-      const decryptedProfiles = profiles.map((p) => ({
+      const decryptedProfiles = profilesRaw.map((p) => ({
         ...p,
         password: p.password,
         twoFAKey: p.twoFAKey,
         cookie: p.cookie,
+        // Map uid to username for backward compatibility
+        username: p.username || p.uid,
       }));
 
       return { profiles: decryptedProfiles };
@@ -76,13 +83,14 @@ export async function registerProfileRoutes(fastify: FastifyInstance) {
   // POST /api/profiles - Create a single profile
   fastify.post('/', async (request: FastifyRequest<{ Body: CreateProfileBody }>, reply: FastifyReply) => {
     try {
-      const { type, proxy, fingerprint, uid, password, twoFAKey, cookie, headless } = request.body;
+      const { type, proxy, fingerprint, username, bmUid, password, twoFAKey, cookie, headless } = request.body;
 
       const profile = await profileManager.createProfile({
         type,
         proxy,
         fingerprint: fingerprint || 'random',
-        uid,
+        username,
+        bmUid,
         password,
         twoFAKey,
         cookie,
@@ -150,12 +158,21 @@ export async function registerProfileRoutes(fastify: FastifyInstance) {
   fastify.get('/export', async (request: FastifyRequest<{ Querystring: { format?: string } }>, reply: FastifyReply) => {
     try {
       const format = request.query.format || 'csv';
-      const profiles = await prisma.profile.findMany();
+      
+      // Use raw query to get profiles with username and bmUid fields
+      const profilesRaw = await prisma.$queryRawUnsafe<Array<any>>(
+        `SELECT * FROM "Profile" ORDER BY "pinned" DESC, "createdAt" DESC`
+      );
 
       if (format === 'csv') {
         const csv = [
-          'id,type,uid,proxy,status,createdAt',
-          ...profiles.map((p) => `${p.id},${p.type},${p.uid || ''},${p.proxy},${p.status},${p.createdAt.toISOString()}`),
+          'id,type,username,bmUid,proxy,status,createdAt',
+          ...profilesRaw.map((p) => {
+            const username = p.username || p.uid || '';
+            const bmUid = p.bmUid || '';
+            const createdAt = p.createdAt ? new Date(p.createdAt).toISOString() : '';
+            return `${p.id},${p.type},${username},${bmUid},${p.proxy},${p.status},${createdAt}`;
+          }),
         ].join('\n');
 
         // Return as plain text, not attachment
@@ -163,7 +180,7 @@ export async function registerProfileRoutes(fastify: FastifyInstance) {
         return csv;
       }
 
-      return { profiles };
+      return { profiles: profilesRaw };
     } catch (error: any) {
       logger.error('Failed to export profiles:', error);
       reply.code(500).send({ error: error.message });
@@ -174,21 +191,33 @@ export async function registerProfileRoutes(fastify: FastifyInstance) {
   fastify.get('/:id', async (request: FastifyRequest<{ Params: { id: string } }>, reply: FastifyReply) => {
     try {
       const id = parseInt(request.params.id);
-      const profile = await prisma.profile.findUnique({
-        where: { id },
-        include: { logs: { take: 10, orderBy: { createdAt: 'desc' } } },
-      });
+      
+      // Use raw query to get profile with username and bmUid fields
+      const profileRaw = await prisma.$queryRawUnsafe<Array<any>>(
+        `SELECT * FROM "Profile" WHERE id = ? LIMIT 1`,
+        id
+      );
 
-      if (!profile) {
+      if (!profileRaw || profileRaw.length === 0) {
         return reply.code(404).send({ error: 'Profile not found' });
       }
+      
+      const profile = profileRaw[0];
+      
+      // Fetch logs separately
+      const logsRaw = await prisma.$queryRawUnsafe<Array<any>>(
+        `SELECT * FROM "Log" WHERE "profileId" = ? ORDER BY "createdAt" DESC LIMIT 10`,
+        id
+      );
 
       return {
         profile: {
           ...profile,
+          username: profile.username || profile.uid, // Map uid to username for backward compatibility
           password: profile.password,
           twoFAKey: profile.twoFAKey,
           cookie: profile.cookie,
+          logs: logsRaw || [],
         },
       };
     } catch (error: any) {
@@ -202,25 +231,83 @@ export async function registerProfileRoutes(fastify: FastifyInstance) {
     try {
       const id = parseInt(request.params.id);
       
-      // Check if profile exists first
-      const existingProfile = await prisma.profile.findUnique({ where: { id } });
-      if (!existingProfile) {
+      // Check if profile exists first using raw query
+      const existingProfileRaw = await prisma.$queryRawUnsafe<Array<any>>(
+        `SELECT * FROM "Profile" WHERE id = ? LIMIT 1`,
+        id
+      );
+      
+      if (!existingProfileRaw || existingProfileRaw.length === 0) {
         return reply.code(404).send({ error: 'Profile not found' });
       }
       
-      const { uid, password, twoFAKey, cookie, deviceConfig } = request.body;
+      const { username, bmUid, password, twoFAKey, cookie, deviceConfig } = request.body;
 
-      const updateData: any = {};
-      if (uid !== undefined) updateData.uid = uid;
-      if (password !== undefined) updateData.password = password || null;
-      if (twoFAKey !== undefined) updateData.twoFAKey = twoFAKey || null;
-      if (cookie !== undefined) updateData.cookie = cookie || null;
-      if (deviceConfig !== undefined) updateData.deviceConfig = deviceConfig;
+      // Check if bmUid column exists, if not, add it (always check, not just when bmUid is provided)
+      try {
+        const columns = await prisma.$queryRaw<Array<{ name: string }>>`
+          PRAGMA table_info(Profile)
+        `;
+        const columnNames = columns.map(col => col.name);
+        if (!columnNames.includes('bmUid')) {
+          logger.info('Adding bmUid column to Profile table...');
+          await prisma.$executeRawUnsafe(`ALTER TABLE "Profile" ADD COLUMN "bmUid" TEXT`);
+          logger.info('bmUid column added successfully');
+        }
+      } catch (e: any) {
+        logger.warn('Failed to check/add bmUid column:', e);
+        // Continue anyway - column might already exist
+      }
 
-      const profile = await prisma.profile.update({
-        where: { id },
-        data: updateData,
-      });
+      // Build UPDATE query dynamically using raw SQL to support bmUid field
+      const updateFields: string[] = [];
+      const updateValues: any[] = [];
+      
+      if (username !== undefined) {
+        updateFields.push(`"username" = ?`);
+        updateValues.push(username || null);
+      }
+      if (bmUid !== undefined) {
+        updateFields.push(`"bmUid" = ?`);
+        updateValues.push(bmUid || null);
+      }
+      if (password !== undefined) {
+        updateFields.push(`"password" = ?`);
+        updateValues.push(password || null);
+      }
+      if (twoFAKey !== undefined) {
+        updateFields.push(`"twoFAKey" = ?`);
+        updateValues.push(twoFAKey || null);
+      }
+      if (cookie !== undefined) {
+        updateFields.push(`"cookie" = ?`);
+        updateValues.push(cookie || null);
+      }
+      if (deviceConfig !== undefined) {
+        updateFields.push(`"deviceConfig" = ?`);
+        updateValues.push(deviceConfig);
+      }
+      
+      // Always update updatedAt
+      updateFields.push(`"updatedAt" = CURRENT_TIMESTAMP`);
+      
+      if (updateFields.length > 0) {
+        updateValues.push(id);
+        const updateQuery = `UPDATE "Profile" SET ${updateFields.join(', ')} WHERE id = ?`;
+        await prisma.$executeRawUnsafe(updateQuery, ...updateValues);
+      }
+
+      // Fetch updated profile using raw query
+      const profileRaw = await prisma.$queryRawUnsafe<Array<any>>(
+        `SELECT * FROM "Profile" WHERE id = ? LIMIT 1`,
+        id
+      );
+      
+      if (!profileRaw || profileRaw.length === 0) {
+        return reply.code(404).send({ error: 'Profile not found after update' });
+      }
+      
+      const profile = profileRaw[0];
 
       return {
         profile: {
