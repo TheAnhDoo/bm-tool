@@ -1,0 +1,76 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Profile {
+  id             Int      @id @default(autoincrement())
+  type           String   // "BM" | "VIA"
+  username       String?  // Username for both VIA and BM
+  bmUid          String?  // UID BM Trung Gian (only for BM profiles) - used for business_id in dashboard link
+  password       String?  // Encrypted
+  twoFAKey       String?  // Encrypted
+  cookie         String?  // Encrypted - Facebook cookies for login
+  proxy          String   // Format: ip:port:user:pass
+  chromeProfile  String   // Path to Chrome user data directory
+  deviceConfig   String   // JSON string of device fingerprint
+  pinned         Boolean  @default(false) // BM Trung Gian profiles are pinned
+  status         String   @default("idle") // "idle" | "running" | "stopped" | "error"
+  lastUsedAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  viaInvites Invite[] @relation("InviteVia")
+  bmInvites  Invite[] @relation("InviteBM")
+  logs       Log[]
+
+  @@index([type])
+  @@index([status])
+  @@index([pinned])
+}
+
+model Invite {
+  id          Int      @id @default(autoincrement())
+  link        String
+  status      String   @default("pending") // "pending" | "processing" | "success" | "failed"
+  viaId       Int?
+  bmId        Int?
+  adAccountId String?
+  result      String?  // JSON string with result details
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  completedAt DateTime?
+
+  viaProfile Profile? @relation("InviteVia", fields: [viaId], references: [id], onDelete: SetNull)
+  bmProfile  Profile? @relation("InviteBM", fields: [bmId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([viaId])
+  @@index([bmId])
+}
+
+model Log {
+  id          Int      @id @default(autoincrement())
+  profileId   Int?
+  action      String   // Action name
+  message     String
+  status      String   // "info" | "success" | "warning" | "error"
+  screenshot  String?  // Path to screenshot file
+  metadata    String?  // JSON string with additional data
+  createdAt   DateTime @default(now())
+
+  profile Profile? @relation(fields: [profileId], references: [id], onDelete: SetNull)
+
+  @@index([profileId])
+  @@index([createdAt])
+  @@index([status])
+}
+
