@@ -284,15 +284,15 @@ export function setupIPCHandlers(mainWindow: BrowserWindow | null) {
     }
   });
 
-  // DELETE /api/invites/batch -> invites:deleteBatch
+  // POST /api/invites/batch/delete -> invites:deleteBatch
   ipcMain.handle('invites:deleteBatch', async (_event, inviteIds: number[]) => {
     try {
-      const response = await makeRequest('/api/invites/batch', 'DELETE', { inviteIds });
+      const response = await makeRequest('/api/invites/batch/delete', 'POST', { inviteIds });
       sendEvent(mainWindow, 'invites:deleted', { count: inviteIds.length });
       return { success: true, data: response };
     } catch (error: any) {
       logger.error('invites:deleteBatch failed:', error);
-      return { success: false, error: error.message };
+      return { success: false, error: error.message || error.toString() };
     }
   });
 
@@ -446,6 +446,116 @@ export function setupIPCHandlers(mainWindow: BrowserWindow | null) {
       logger.error('reports:export failed:', error);
       return { success: false, error: error.message };
     }
+  });
+
+  // DELETE /api/reports/batch -> reports:deleteBatch
+  ipcMain.handle('reports:deleteBatch', async (_event, reportIds: number[]) => {
+    try {
+      const response = await makeRequest('/api/reports/batch', 'DELETE', { reportIds });
+      sendEvent(mainWindow, 'reports:deleted', { count: reportIds.length });
+      return { success: true, data: response };
+    } catch (error: any) {
+      logger.error('reports:deleteBatch failed:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // ============================================
+  // AUTO BM SCRIPT
+  // ============================================
+
+  let autoBmScriptCancelled = false;
+  let autoBmScriptRunning = false;
+
+  ipcMain.handle('autoBm:run', async (_event, data: { bmId: number; viaIds: number[]; inviteLinks: string[]; headless?: boolean }) => {
+    if (autoBmScriptRunning) {
+      return { success: false, error: 'Script is already running' };
+    }
+
+    try {
+      autoBmScriptRunning = true;
+      autoBmScriptCancelled = false;
+
+      // Get profiles from database using raw SQL to ensure bmUid and username are included
+      const prisma = getPrismaClient();
+      
+      // Get BM profile with bmUid and username
+      const bmRaw = await prisma.$queryRawUnsafe<Array<any>>(
+        `SELECT * FROM "Profile" WHERE id = ? AND type = 'BM' LIMIT 1`,
+        data.bmId
+      );
+      
+      if (!bmRaw || bmRaw.length === 0) {
+        throw new Error('BM profile not found');
+      }
+      
+      const bm = bmRaw[0];
+      
+      // Check if bmUid is set
+      if (!bm.bmUid || bm.bmUid.trim() === '') {
+        throw new Error('BM profile must have bmUid set. Please update the BM profile with bmUid in the profile settings.');
+      }
+
+      // Get VIA profiles with username
+      if (data.viaIds.length === 0) {
+        throw new Error('No VIA profiles selected');
+      }
+      
+      const placeholders = data.viaIds.map(() => '?').join(',');
+      const viasRaw = await prisma.$queryRawUnsafe<Array<any>>(
+        `SELECT * FROM "Profile" WHERE id IN (${placeholders}) AND type = 'VIA'`,
+        ...data.viaIds
+      );
+
+      if (viasRaw.length === 0) {
+        throw new Error('No VIA profiles found');
+      }
+      
+      const vias = viasRaw;
+
+      // Map uid to username for backward compatibility
+      const bmWithUsername = {
+        ...bm,
+        username: bm.username || bm.uid || null,
+      };
+      
+      const viasWithUsername = vias.map(via => ({
+        ...via,
+        username: via.username || via.uid || null,
+      }));
+
+      // Import and run script
+      const { runAutoBmScript } = await import('../modules/autoBmScript');
+      
+      await runAutoBmScript({
+        bm: bmWithUsername as any,
+        vias: viasWithUsername as any,
+        inviteLinks: data.inviteLinks,
+        headless: data.headless || false,
+        onLog: (log) => {
+          sendEvent(mainWindow, 'autoBm:log', log);
+        },
+        onProgress: (done, total) => {
+          sendEvent(mainWindow, 'autoBm:progress', { done, total });
+        },
+        isCancelled: () => autoBmScriptCancelled,
+      });
+
+      sendEvent(mainWindow, 'autoBm:complete', {});
+      autoBmScriptRunning = false;
+      return { success: true };
+    } catch (error: any) {
+      autoBmScriptRunning = false;
+      logger.error('autoBm:run failed:', error);
+      sendEvent(mainWindow, 'autoBm:error', error.message || 'Unknown error');
+      return { success: false, error: error.message || error.toString() };
+    }
+  });
+
+  ipcMain.handle('autoBm:stop', async () => {
+    autoBmScriptCancelled = true;
+    autoBmScriptRunning = false;
+    return { success: true };
   });
 
   // ============================================

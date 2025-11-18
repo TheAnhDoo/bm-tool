@@ -14,24 +14,63 @@ export async function registerInviteRoutes(fastify: FastifyInstance) {
   fastify.get('/', async (request: FastifyRequest<{ Querystring: { search?: string; status?: string } }>, reply: FastifyReply) => {
     try {
       const { search, status } = request.query;
-      const where: any = {};
+      
+      // Build WHERE clause
+      let whereClause = '1=1';
+      const params: any[] = [];
 
       if (status) {
-        where.status = status;
+        whereClause += ' AND "status" = ?';
+        params.push(status);
       }
 
       if (search) {
-        where.link = { contains: search };
+        whereClause += ' AND "link" LIKE ?';
+        params.push(`%${search}%`);
       }
 
-      const invites = await prisma.invite.findMany({
-        where,
-        orderBy: { createdAt: 'desc' },
-        include: {
-          viaProfile: { select: { id: true, uid: true } },
-          bmProfile: { select: { id: true, uid: true } },
-        },
-      });
+      // Use raw query to handle both username and uid fields
+      const invitesRaw = await prisma.$queryRawUnsafe<Array<any>>(
+        `SELECT 
+          i.*,
+          vp.id as via_profile_id,
+          vp.username as via_username,
+          vp.uid as via_uid,
+          bp.id as bm_profile_id,
+          bp.username as bm_username,
+          bp.uid as bm_uid,
+          bp.bmUid as bm_bmUid
+        FROM "Invite" i
+        LEFT JOIN "Profile" vp ON i."viaId" = vp.id
+        LEFT JOIN "Profile" bp ON i."bmId" = bp.id
+        WHERE ${whereClause}
+        ORDER BY i."createdAt" DESC`,
+        ...params
+      );
+
+      // Map results to expected format
+      const invites = invitesRaw.map((row: any) => ({
+        id: row.id,
+        link: row.link,
+        status: row.status,
+        notes: row.notes,
+        viaId: row.viaId,
+        bmId: row.bmId,
+        adAccountId: row.adAccountId,
+        result: row.result,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+        completedAt: row.completedAt,
+        viaProfile: row.via_profile_id ? {
+          id: row.via_profile_id,
+          username: row.via_username || row.via_uid || null,
+        } : null,
+        bmProfile: row.bm_profile_id ? {
+          id: row.bm_profile_id,
+          username: row.bm_username || row.bm_uid || null,
+          bmUid: row.bm_bmUid || null,
+        } : null,
+      }));
 
       return { invites };
     } catch (error: any) {
@@ -124,12 +163,15 @@ export async function registerInviteRoutes(fastify: FastifyInstance) {
     }
   });
 
-  // DELETE /api/invites/batch - Delete multiple invites
-  fastify.delete('/batch', async (request: FastifyRequest<{ Body: { inviteIds: number[] } }>, reply: FastifyReply) => {
+  // POST /api/invites/batch/delete - Delete multiple invites (using POST to avoid body parsing issues)
+  fastify.post('/batch/delete', async (request: FastifyRequest<{ Body: { inviteIds: number[] } }>, reply: FastifyReply) => {
     try {
       const { inviteIds } = request.body;
-      await prisma.invite.deleteMany({ where: { id: { in: inviteIds } } });
-      return { success: true, count: inviteIds.length };
+      if (!inviteIds || inviteIds.length === 0) {
+        return reply.code(400).send({ error: 'No invite IDs provided' });
+      }
+      const result = await prisma.invite.deleteMany({ where: { id: { in: inviteIds } } });
+      return { success: true, count: result.count };
     } catch (error: any) {
       logger.error('Failed to delete invites:', error);
       reply.code(500).send({ error: error.message });

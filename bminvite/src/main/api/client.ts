@@ -17,7 +17,7 @@ export async function makeRequest(route: string, method: string, data?: any, que
     
     const methodUpper = method.toUpperCase();
     const hasData = data !== undefined && data !== null;
-    const needsBody = methodUpper === 'POST' || methodUpper === 'PUT';
+    const needsBody = methodUpper === 'POST' || methodUpper === 'PUT' || methodUpper === 'DELETE';
     
     const headers: Record<string, string> = {};
     // Only set Content-Type when we actually have data to send
@@ -57,7 +57,12 @@ export async function makeRequest(route: string, method: string, data?: any, que
             if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
               resolve(response);
             } else {
-              reject(new Error(response.message || `HTTP ${res.statusCode}`));
+              // Include more details in error message
+              const errorMessage = response.error || response.message || `HTTP ${res.statusCode}`;
+              const error = new Error(errorMessage);
+              (error as any).statusCode = res.statusCode;
+              (error as any).response = response;
+              reject(error);
             }
           }
         } catch (error) {
@@ -75,7 +80,7 @@ export async function makeRequest(route: string, method: string, data?: any, que
       reject(error);
     });
 
-    // Only write body if we have data and it's a method that needs a body
+    // Write body if we have data and it's a method that supports a body
     if (hasData && needsBody) {
       req.write(JSON.stringify(data));
     }

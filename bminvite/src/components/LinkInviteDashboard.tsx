@@ -12,6 +12,8 @@ interface LinkInvite {
   link: string;
   notes: string | null;
   status: string;
+  viaId?: number | null;
+  bmId?: number | null;
   createdAt: string;
   viaProfile?: { id: number; username: string | null };
   bmProfile?: { id: number; username: string | null; bmUid?: string | null };
@@ -34,17 +36,21 @@ export function LinkInviteDashboard() {
     window.addEventListener('invite:created', handleInviteCreated);
     
     // Subscribe to automation events
+    let unsubscribe: (() => void) | undefined;
     if (window.electronAPI) {
-      const unsubscribe = window.electronAPI.subscribeAutomation((event, data) => {
-        if (event === 'invite:deleted' || event === 'invites:created') {
+      unsubscribe = window.electronAPI.subscribeAutomation((event, data) => {
+        if (event === 'invite:deleted' || event === 'invites:deleted' || event === 'invites:created') {
           loadInvites();
         }
       });
-      return () => {
-        window.removeEventListener('invite:created', handleInviteCreated);
-        unsubscribe();
-      };
     }
+    
+    return () => {
+      window.removeEventListener('invite:created', handleInviteCreated);
+      if (unsubscribe) {
+        unsubscribe();
+      }
+    };
   }, []);
 
   const loadInvites = async () => {
@@ -53,9 +59,17 @@ export function LinkInviteDashboard() {
       const result = await api.listInvites({ search: searchQuery });
       if (result.success && result.data?.invites) {
         setLinks(result.data.invites);
+        // Clear selected IDs that no longer exist
+        setSelectedIds(prev => prev.filter(id => result.data.invites.some((invite: LinkInvite) => invite.id === id)));
+      } else {
+        console.error('Failed to load invites:', result.error);
+        if (result.error) {
+          alert(`Failed to load invites: ${result.error}`);
+        }
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to load invites:', error);
+      alert(`Failed to load invites: ${error.message || 'Unknown error'}`);
     } finally {
       setLoading(false);
     }
@@ -73,19 +87,22 @@ export function LinkInviteDashboard() {
 
   const handleDelete = async () => {
     if (selectedIds.length === 0) return;
-    if (!confirm(`Are you sure you want to delete ${selectedIds.length} invite(s)?`)) return;
+    const count = selectedIds.length;
+    if (!confirm(`Are you sure you want to delete ${count} invite(s)?`)) return;
 
     try {
       const result = await api.deleteInvites(selectedIds);
       if (result.success) {
-        alert(`Deleted ${selectedIds.length} invite(s) successfully`);
         setSelectedIds([]);
-        loadInvites();
+        await loadInvites();
+        // Show success message after reload
+        alert(`Deleted ${count} invite(s) successfully`);
       } else {
-        alert(`Error: ${result.error}`);
+        alert(`Error: ${result.error || 'Failed to delete invites'}`);
       }
     } catch (error: any) {
-      alert(`Error: ${error.message}`);
+      console.error('Delete error:', error);
+      alert(`Error: ${error.message || 'Failed to delete invites'}`);
     }
   };
 
@@ -155,8 +172,6 @@ export function LinkInviteDashboard() {
                   <TableHead>ID</TableHead>
                   <TableHead>Link</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead>VIA Profile</TableHead>
-                  <TableHead>BM Profile</TableHead>
                   <TableHead>Notes</TableHead>
                   <TableHead>Created</TableHead>
                 </TableRow>
@@ -164,62 +179,55 @@ export function LinkInviteDashboard() {
               <TableBody>
                 {filteredLinks.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={8} className="text-center py-8 text-gray-500">
+                    <TableCell colSpan={6} className="text-center py-8 text-gray-500">
                       No invites found
                     </TableCell>
                   </TableRow>
                 ) : (
-                  filteredLinks.map((link) => (
-                    <TableRow key={link.id} style={{ borderColor: "#E5E7EB" }}>
-                      <TableCell>
-                        <Checkbox
-                          checked={selectedIds.includes(link.id)}
-                          onCheckedChange={(checked) => {
-                            if (checked) {
-                              setSelectedIds([...selectedIds, link.id]);
-                            } else {
-                              setSelectedIds(selectedIds.filter(id => id !== link.id));
-                            }
-                          }}
-                        />
-                      </TableCell>
-                      <TableCell>{link.id}</TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-2">
-                          <a
-                            href={link.link}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-blue-600 hover:underline flex items-center gap-1"
-                          >
-                            {link.link.substring(0, 50)}...
-                            <ExternalLink size={14} />
-                          </a>
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <span className={`px-2 py-1 rounded text-xs ${
-                          link.status === 'completed' ? 'bg-green-100 text-green-800' :
-                          link.status === 'processing' ? 'bg-yellow-100 text-yellow-800' :
-                          link.status === 'failed' ? 'bg-red-100 text-red-800' :
-                          'bg-gray-100 text-gray-800'
-                        }`}>
-                          {link.status}
-                        </span>
-                      </TableCell>
-                      <TableCell>{link.viaProfile?.username || 'N/A'}</TableCell>
-                      <TableCell>
-                        <div className="flex flex-col gap-1">
-                          <span>{link.bmProfile?.username || 'N/A'}</span>
-                          {link.bmProfile?.bmUid && (
-                            <span className="text-xs text-gray-500">BM UID: {link.bmProfile.bmUid}</span>
-                          )}
-                        </div>
-                      </TableCell>
-                      <TableCell>{link.notes || 'N/A'}</TableCell>
-                      <TableCell>{new Date(link.createdAt).toLocaleString()}</TableCell>
-                    </TableRow>
-                  ))
+                  filteredLinks.map((link) => {
+                    // Determine if link has been used: has viaId and bmId, or status is success
+                    const isUsed = (link.viaId && link.bmId) || link.status === 'success';
+                    const statusDisplay = isUsed ? 'Đã dùng' : 'Chưa dùng';
+                    const statusColor = isUsed ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800';
+                    
+                    return (
+                      <TableRow key={link.id} style={{ borderColor: "#E5E7EB" }}>
+                        <TableCell>
+                          <Checkbox
+                            checked={selectedIds.includes(link.id)}
+                            onCheckedChange={(checked) => {
+                              if (checked) {
+                                setSelectedIds([...selectedIds, link.id]);
+                              } else {
+                                setSelectedIds(selectedIds.filter(id => id !== link.id));
+                              }
+                            }}
+                          />
+                        </TableCell>
+                        <TableCell>{link.id}</TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-2">
+                            <a
+                              href={link.link}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-blue-600 hover:underline flex items-center gap-1"
+                            >
+                              {link.link.substring(0, 50)}...
+                              <ExternalLink size={14} />
+                            </a>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <span className={`px-2 py-1 rounded text-xs ${statusColor}`}>
+                            {statusDisplay}
+                          </span>
+                        </TableCell>
+                        <TableCell>{link.notes || 'N/A'}</TableCell>
+                        <TableCell>{new Date(link.createdAt).toLocaleString()}</TableCell>
+                      </TableRow>
+                    );
+                  })
                 )}
               </TableBody>
             </Table>

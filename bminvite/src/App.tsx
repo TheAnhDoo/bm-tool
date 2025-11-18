@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { LayoutDashboard, Users, Link2, Building2, Link, FileText } from "lucide-react";
+import { LayoutDashboard, Users, Link2, Building2, Link, FileText, PlayCircle } from "lucide-react";
 import { Dashboard } from "./components/Dashboard";
 import { ProfileDashboard } from "./components/ProfileDashboard";
 import { ViaDashboard } from "./components/ViaDashboard";
 import { BMTrungGianDashboard } from "./components/BMTrungGianDashboard";
 import { LinkInviteDashboard } from "./components/LinkInviteDashboard";
 import { ReportDashboard } from "./components/ReportDashboard";
+import { AutoBmPage } from "./components/AutoBmPage";
 
 export default function App() {
   const [activeView, setActiveView] = useState("dashboard");
@@ -17,6 +18,7 @@ export default function App() {
     { id: "bm-trung-gian", icon: Building2, label: "BM Trung Gian" },
     { id: "link-invite", icon: Link, label: "Link Invite" },
     { id: "report", icon: FileText, label: "Report" },
+    { id: "auto-bm-script", icon: PlayCircle, label: "Auto BM Script" },
   ];
 
   return (
@@ -92,6 +94,7 @@ export default function App() {
         {activeView === "bm-trung-gian" && <BMTrungGianDashboard />}
         {activeView === "link-invite" && <LinkInviteDashboard />}
         {activeView === "report" && <ReportDashboard />}
+        {activeView === "auto-bm-script" && <AutoBmPage />}
       </div>
     </div>
   );

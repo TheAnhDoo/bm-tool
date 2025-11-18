@@ -147,6 +147,22 @@ class APIService {
     return this.callIPC('reports:export', format);
   }
 
+  async deleteReports(reportIds: number[]) {
+    return this.callIPC('reports:deleteBatch', reportIds);
+  }
+
+  // ============================================
+  // AUTO BM SCRIPT
+  // ============================================
+
+  async runAutoBmScript(data: { bmId: number; viaIds: number[]; inviteLinks: string[]; headless?: boolean }) {
+    return this.callIPC('autoBm:run', data);
+  }
+
+  async stopAutoBmScript() {
+    return this.callIPC('autoBm:stop');
+  }
+
   // ============================================
   // FILE OPERATIONS
   // ============================================

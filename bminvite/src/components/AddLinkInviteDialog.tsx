@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link as LinkIcon, Upload } from "lucide-react";
 import {
   Dialog,
@@ -22,6 +22,15 @@ export function AddLinkInviteDialog({ open, onOpenChange }: AddLinkInviteDialogP
   const [inviteLinks, setInviteLinks] = useState("");
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
+
+  // Reset form when dialog closes
+  useEffect(() => {
+    if (!open) {
+      setInviteLinks("");
+      setNotes("");
+      setSaving(false);
+    }
+  }, [open]);
 
   const handleSave = async () => {
     if (!inviteLinks.trim()) {

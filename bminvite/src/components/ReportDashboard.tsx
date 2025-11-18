@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
-import { Download, RefreshCw } from "lucide-react";
+import { Download, RefreshCw, Trash2 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
+import { Checkbox } from "./ui/checkbox";
 import {
   Table,
   TableBody,
@@ -27,6 +28,7 @@ export function ReportDashboard() {
   const [reports, setReports] = useState<Report[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
 
   useEffect(() => {
     loadReports();
@@ -49,6 +51,11 @@ export function ReportDashboard() {
           time: r.time ? new Date(r.time).toLocaleString('vi-VN') : new Date().toLocaleString('vi-VN'),
         }));
         setReports(mappedReports);
+      } else {
+        console.error('Failed to load reports:', result.error);
+        if (result.error) {
+          alert(`Failed to load reports: ${result.error}`);
+        }
       }
     } catch (error: any) {
       console.error('Failed to load reports:', error);
@@ -74,6 +81,28 @@ export function ReportDashboard() {
       }
     } catch (error: any) {
       alert(`Error: ${error.message}`);
+    }
+  };
+
+  const handleDeleteSelected = async () => {
+    if (selectedIds.length === 0) {
+      alert('Vui lòng chọn ít nhất một report để xóa');
+      return;
+    }
+    
+    if (!confirm(`Bạn có chắc muốn xóa ${selectedIds.length} report đã chọn?`)) return;
+    
+    try {
+      const result = await api.deleteReports(selectedIds);
+      if (result.success) {
+        alert(`Đã xóa ${result.data?.count || 0} report thành công!`);
+        setSelectedIds([]);
+        await loadReports();
+      } else {
+        alert(`Error: ${result.error || 'Không thể xóa report'}`);
+      }
+    } catch (error: any) {
+      alert(`Error: ${error.message || 'Đã xảy ra lỗi khi xóa report'}`);
     }
   };
 
@@ -132,6 +161,16 @@ export function ReportDashboard() {
               Refresh
             </Button>
             <Button
+              variant="outline"
+              className="rounded-xl gap-2"
+              onClick={handleDeleteSelected}
+              disabled={selectedIds.length === 0}
+              style={{ borderColor: "#E5E7EB", color: "#EF4444" }}
+            >
+              <Trash2 size={18} />
+              Xóa ({selectedIds.length})
+            </Button>
+            <Button
               className="rounded-xl gap-2"
               onClick={handleExportCSV}
               style={{ backgroundColor: "#4F46E5" }}
@@ -147,6 +186,18 @@ export function ReportDashboard() {
           <Table>
             <TableHeader>
               <TableRow style={{ borderColor: "#E5E7EB" }}>
+                <TableHead className="w-12">
+                  <Checkbox
+                    checked={selectedIds.length === reports.length && reports.length > 0}
+                    onCheckedChange={(checked) => {
+                      if (checked) {
+                        setSelectedIds(reports.map(r => r.id));
+                      } else {
+                        setSelectedIds([]);
+                      }
+                    }}
+                  />
+                </TableHead>
                 <TableHead>ID Via</TableHead>
                 <TableHead>Username</TableHead>
                 <TableHead>ID Ad Account</TableHead>
@@ -159,19 +210,31 @@ export function ReportDashboard() {
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center py-8 text-gray-500">
+                  <TableCell colSpan={8} className="text-center py-8 text-gray-500">
                     Đang tải dữ liệu...
                   </TableCell>
                 </TableRow>
               ) : reports.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center py-8 text-gray-500">
+                  <TableCell colSpan={8} className="text-center py-8 text-gray-500">
                     Không có báo cáo nào
                   </TableCell>
                 </TableRow>
               ) : (
                 reports.map((report) => (
                   <TableRow key={report.id} style={{ borderColor: "#E5E7EB" }}>
+                    <TableCell>
+                      <Checkbox
+                        checked={selectedIds.includes(report.id)}
+                        onCheckedChange={(checked) => {
+                          if (checked) {
+                            setSelectedIds([...selectedIds, report.id]);
+                          } else {
+                            setSelectedIds(selectedIds.filter(id => id !== report.id));
+                          }
+                        }}
+                      />
+                    </TableCell>
                     <TableCell>{report.idVia || 'N/A'}</TableCell>
                     <TableCell>{report.username || 'N/A'}</TableCell>
                     <TableCell>{report.idAdAccount || 'N/A'}</TableCell>
