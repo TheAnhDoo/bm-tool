@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Play, Square, X, Search } from "lucide-react";
+import { Play, Square, X, Search, TestTube } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
@@ -193,6 +193,53 @@ export function AutoBmPage() {
     setProgress({ done: 0, total: 0 });
   };
 
+  const handleTest = async () => {
+    if (!selectedBmId) {
+      alert('Vui lòng chọn BM trung gian');
+      return;
+    }
+
+    if (selectedViaIds.length === 0) {
+      alert('Vui lòng chọn ít nhất một VIA');
+      return;
+    }
+
+    if (selectedViaIds.length > 1) {
+      alert('Test Mode chỉ hỗ trợ 1 VIA. Vui lòng chọn chỉ 1 VIA.');
+      return;
+    }
+
+    const selectedBM = bmProfiles.find((p) => p.id === selectedBmId);
+    const selectedVIA = viaProfiles.find((p) => selectedViaIds.includes(p.id));
+
+    if (!selectedBM) {
+      alert('BM trung gian không tồn tại');
+      return;
+    }
+
+    if (!selectedVIA) {
+      alert('VIA không tồn tại');
+      return;
+    }
+
+    try {
+      const result = await api.testAutoBmProfiles({
+        bmId: selectedBM.id,
+        viaId: selectedVIA.id,
+        headless: headless,
+      });
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to run test');
+      }
+
+      alert('✅ Test Mode: Đã mở VIA và BM profiles. Browsers sẽ giữ nguyên để bạn test selectors.\n\nVIA: Đã đến bước click avatar\nBM: Đã set cookies và navigate xong');
+    } catch (error: any) {
+      console.error('Test Mode error:', error);
+      alert(`Error: ${error.message || 'Đã xảy ra lỗi khi chạy test mode'}`);
+    }
+  };
+
   const formatDate = (timestamp: number) => {
     return new Date(timestamp).toLocaleString('vi-VN');
   };
@@ -257,6 +304,15 @@ export function AutoBmPage() {
           >
             <X size={18} />
             Clear Log
+          </Button>
+          <Button
+            className="rounded-xl gap-2"
+            style={{ backgroundColor: "#8B5CF6" }}
+            onClick={handleTest}
+            disabled={isRunning || !selectedBmId || selectedViaIds.length !== 1}
+          >
+            <TestTube size={18} />
+            Test Mode
           </Button>
           <div className="flex items-center gap-2 ml-4">
             <Checkbox

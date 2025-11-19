@@ -163,6 +163,10 @@ class APIService {
     return this.callIPC('autoBm:stop');
   }
 
+  async testAutoBmProfiles(data: { bmId: number; viaId: number; headless?: boolean }) {
+    return this.callIPC('autoBm:test', data);
+  }
+
   // ============================================
   // FILE OPERATIONS
   // ============================================
