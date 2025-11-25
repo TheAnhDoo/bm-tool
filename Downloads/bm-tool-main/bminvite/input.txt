@@ -1,0 +1,34 @@
+Profile ID: 1
+Type: BM
+Username: 100030141489338
+BM UID: 1124970884344897
+Password: g8uy9f0yd
+2FA Key: UC2SXSX2UNNTKA7B6UVIIS2LIC7DQBJH
+Cookie: fr=0syIpp7Fn01iI6xHg.AWdM6myGnJpPxp5X5HkuNJSidwOOy8bAoW5S8Zt2cJg3iKT9Yks.BpAYqT..AAA.0.0.BpAYqm.AWdKAXv0M_NLdCkNFv6t9igiqVk;sb=k4oBacett6EfYC0r8Tica1od;c_user=100030141489338;xs=5%3AxGj1z2IRkRNROg%3A2%3A1761708704%3A-1%3A-1;locale=en_US;pas=100030141489338%3AaZL7Hhl4rt;
+Proxy: 74.122.59.177:41890:U4lA3hY3mZyp9Kb:eeeBVDZY1UPTIL8
+User Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36
+Status: idle
+Headless: No
+Created At: 2025-11-17T21:16:16.000Z
+---
+
+Profile ID: 2
+Type: VIA
+Username: 100009462237458
+
+Password: Dongian331@@
+2FA Key: FHRQ WUGZ TY5L TOHY Y3A6 P5TA Y25P 7NZI
+Cookie: fr=1lrTrhauwPaRijPg1.AWcMQUHC0ndUB6O3H6LeN0GclMx2rUlKUvdUtfRIChvJ3CEHVA0.BpEM5M..AAA.0.0.BpEM5i.AWfM3gcR-lDxPT_Hs7-0t_y8HKM; xs=34%3AxWscjsEtea84yg%3A2%3A1761124931%3A-1%3A-1%3A%3AAcx_nKD5nAkmeHUR-eteu9wKKI2Sz8bbcBISldHS0Q; dpr=0.699999988079071; wd=500x404; c_user=100009462237458; sb=Hv31aNm-CqQqrklVIYXEwMkv; ps_n=1; ps_l=1; locale=en_US; datr=Hv31aEnDHrIcGB51iKcMLG_C
+Profile ID: 1
+Type: BM
+Username: 100030141489338
+BM UID: 1124970884344897
+Password: g8uy9f0yd
+2FA Key: UC2SXSX2UNNTKA7B6UVIIS2LIC7DQBJH
+Cookie: fr=0syIpp7Fn01iI6xHg.AWdM6myGnJpPxp5X5HkuNJSidwOOy8bAoW5S8Zt2cJg3iKT9Yks.BpAYqT..AAA.0.0.BpAYqm.AWdKAXv0M_NLdCkNFv6t9igiqVk;sb=k4oBacett6EfYC0r8Tica1od;c_user=100030141489338;xs=5%3AxGj1z2IRkRNROg%3A2%3A1761708704%3A-1%3A-1;locale=en_US;pas=100030141489338%3AaZL7Hhl4rt;
+Proxy: 74.122.59.177:41890:U4lA3hY3mZyp9Kb:eeeBVDZY1UPTIL8
+User Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36
+Status: idle
+Headless: No
+Created At: 2025-11-17T21:16:16.000Z
+---

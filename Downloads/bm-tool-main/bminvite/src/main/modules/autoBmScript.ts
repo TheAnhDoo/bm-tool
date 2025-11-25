@@ -2,6 +2,54 @@ import { ViaRunner } from '../automation/viaRunner';
 import { BMRunner } from '../automation/bmRunner';
 import { Profile } from '@prisma/client';
 import { logger } from '../utils/logger';
+import { getPrismaClient } from '../db/prismaClient';
+import randomFirstName from 'random-firstname';
+import randomLastName from 'random-lastname';
+
+// Helper function to parse cookie string - giống hệt ProfileManager
+function parseCookieString(cookieString: string, targetDomain: string = 'facebook.com'): Array<{ name: string; value: string; domain?: string; path?: string; expires?: number; httpOnly?: boolean; secure?: boolean; sameSite?: 'Strict' | 'Lax' | 'None' }> {
+  const cookies: Array<{ name: string; value: string; domain?: string; path?: string; expires?: number; httpOnly?: boolean; secure?: boolean; sameSite?: 'Strict' | 'Lax' | 'None' }> = [];
+  
+  // Split by semicolon to get individual cookies
+  const cookiePairs = cookieString.split(';').map(c => c.trim()).filter(c => c);
+  
+  // Facebook cookies that should be httpOnly
+  const httpOnlyCookies = ['xs', 'c_user', 'datr', 'sb'];
+  
+  for (const pair of cookiePairs) {
+    const equalIndex = pair.indexOf('=');
+    if (equalIndex === -1) continue; // Skip if no '=' found
+    
+    const name = pair.substring(0, equalIndex).trim();
+    const value = pair.substring(equalIndex + 1).trim();
+    
+    if (name && value) {
+      // Try to decode, but if it fails, use original value
+      let decodedValue = value;
+      try {
+        decodedValue = decodeURIComponent(value);
+      } catch (e) {
+        // If decoding fails, use original value
+        decodedValue = value;
+      }
+      
+      // Determine if cookie should be httpOnly (Facebook security cookies)
+      const isHttpOnly = httpOnlyCookies.includes(name);
+      
+      cookies.push({
+        name: name.trim(),
+        value: decodedValue,
+        domain: targetDomain, // Use targetDomain for better compatibility
+        path: '/',
+        secure: true,
+        httpOnly: isHttpOnly,
+        sameSite: 'None' as const,
+      });
+    }
+  }
+  
+  return cookies;
+}
 
 export const BM_RATE_LIMIT_PER_ROUND = 2 as const;
 
@@ -58,27 +106,283 @@ function calculateWindowPosition(index: number): { width: number; height: number
 }
 
 /**
- * Helper: Wait for element with multiple selector strategies
+ * Selector Builder - Helper để dễ dàng thêm selectors khi test và cải tiến
  */
-async function waitAndClick(page: any, selectors: string[], timeout: number = 10000): Promise<boolean> {
+class SelectorBuilder {
+  private selectors: string[] = [];
+
+  /**
+   * Thêm XPath selector
+   * @example xpath('//*[@id="u_0_3_RL"]/img[1]')
+   */
+  xpath(selector: string): SelectorBuilder {
+    this.selectors.push(selector);
+    return this;
+  }
+
+  /**
+   * Thêm CSS selector
+   * @example css('#u_0_3_RL > img')
+   */
+  css(selector: string): SelectorBuilder {
+    this.selectors.push(selector);
+    return this;
+  }
+
+  /**
+   * Thêm nhiều XPath selectors cùng lúc
+   * @example xpaths('//div[@id="test"]', '//span[@class="test"]')
+   */
+  xpaths(...selectors: string[]): SelectorBuilder {
+    this.selectors.push(...selectors);
+    return this;
+  }
+
+  /**
+   * Thêm nhiều CSS selectors cùng lúc
+   * @example csss('#test', '.test', 'div.test')
+   */
+  csss(...selectors: string[]): SelectorBuilder {
+    this.selectors.push(...selectors);
+    return this;
+  }
+
+  /**
+   * Build và trả về array selectors
+   */
+  build(): string[] {
+    return this.selectors;
+  }
+
+  /**
+   * Reset selectors
+   */
+  reset(): SelectorBuilder {
+    this.selectors = [];
+    return this;
+  }
+}
+
+/**
+ * Helper function để tạo SelectorBuilder mới
+ * @example selectors().css('#test').xpath('//div').build()
+ */
+function selectors(): SelectorBuilder {
+  return new SelectorBuilder();
+}
+
+/**
+ * Find elements by CSS selector - GIỐNG HỆT extension contentScript.js
+ * Sử dụng document.querySelectorAll() trong browser context
+ */
+async function findByCss(page: any, selector: string): Promise<any[]> {
+  try {
+    // Dùng page.evaluate để chạy trong browser context giống extension
+    const elements = await page.evaluate((sel: string) => {
+      return Array.from(document.querySelectorAll(sel));
+    }, selector);
+    
+    // Convert DOM elements sang Puppeteer ElementHandle
+    if (!elements || elements.length === 0) {
+      return [];
+    }
+    
+    // Tìm lại bằng Puppeteer để có ElementHandle
+    const puppeteerElements = await page.$$(selector);
+    return puppeteerElements || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * Find elements by XPath - GIỐNG HỆT extension contentScript.js
+ * Sử dụng document.evaluate() trong browser context
+ */
+async function findByXPath(page: any, xpath: string): Promise<any[]> {
+  try {
+    // Dùng page.evaluate để chạy trong browser context giống extension
+    const elementCount = await page.evaluate((xpathStr: string) => {
+      const result = document.evaluate(
+        xpathStr,
+        document,
+        null,
+        XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+        null
+      );
+      return result.snapshotLength;
+    }, xpath);
+    
+    if (elementCount === 0) {
+      return [];
+    }
+    
+    // Tìm lại bằng Puppeteer để có ElementHandle
+    const puppeteerElements = await page.$x(xpath);
+    return puppeteerElements || [];
+  } catch (e) {
+    return [];
+  }
+}
+
+/**
+ * Helper: Wait for element with multiple selector strategies
+ * Tìm và click TRỰC TIẾP trong browser context - nhanh, không đợi timeout
+ * Giống extension: tìm -> scroll -> click ngay
+ * @param timeout - Không dùng, giữ lại để tương thích với code cũ
+ */
+async function waitAndClick(page: any, selectors: string[], _timeout?: number): Promise<boolean> {
+  // Tìm và click trực tiếp trong browser context - không đợi Puppeteer wait
+  const result = await page.evaluate((selectorsList: string[]) => {
+    // Thử từng selector cho đến khi tìm thấy và click được
+    for (const selector of selectorsList) {
+      try {
+        let elements: Element[] = [];
+        
+        if (selector.startsWith('//')) {
+          // XPath - giống extension
+          const xpathResult = document.evaluate(
+            selector,
+            document,
+            null,
+            XPathResult.ORDERED_NODE_SNAPSHOT_TYPE,
+            null
+          );
+          for (let i = 0; i < xpathResult.snapshotLength; i++) {
+            const node = xpathResult.snapshotItem(i);
+            if (node instanceof Element) {
+              elements.push(node);
+            }
+          }
+        } else {
+          // CSS selector - giống extension
+          elements = Array.from(document.querySelectorAll(selector));
+        }
+
+        if (elements.length === 0) {
+          continue; // Thử selector tiếp theo
+        }
+
+        // Lấy element đầu tiên
+        const target = elements[0];
+
+        // Scroll vào view - giống extension
+        target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+
+        // Click ngay - giống extension
+        try {
+          (target as HTMLElement).click();
+          return { success: true, selector };
+        } catch (e) {
+          // Nếu click fail, thử selector tiếp theo
+          continue;
+        }
+      } catch (e) {
+        // Thử selector tiếp theo
+        continue;
+      }
+    }
+    return { success: false };
+  }, selectors);
+
+  if (result.success) {
+    logger.debug(`Successfully clicked element with selector: ${result.selector}`);
+    // Đợi một chút để action được xử lý
+    await new Promise(resolve => setTimeout(resolve, 500));
+    return true;
+  }
+
+  return false;
+}
+
+async function readClipboardText(page: any): Promise<string> {
+  return page.evaluate(async () => {
+    if (!navigator.clipboard || !navigator.clipboard.readText) {
+      return '';
+    }
+    try {
+      const text = await navigator.clipboard.readText();
+      return text?.trim() || '';
+    } catch {
+      return '';
+    }
+  });
+}
+
+async function selectAndCopyByXPath(page: any, xpath: string): Promise<string> {
+  return page.evaluate(async (xpathStr: string) => {
+    const xpathResult = document.evaluate(
+      xpathStr,
+      document,
+      null,
+      XPathResult.FIRST_ORDERED_NODE_TYPE,
+      null
+    );
+    const element = xpathResult.singleNodeValue as HTMLElement | null;
+    if (!element) {
+      return '';
+    }
+
+    const selection = window.getSelection();
+    if (!selection) {
+      return '';
+    }
+
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    document.execCommand('copy');
+
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text?.trim()) {
+          return text.trim();
+        }
+      } catch {
+        // ignore clipboard read errors
+      }
+    }
+
+    return selection.toString().trim();
+  }, xpath);
+}
+
+function isRunnerPageActive(runner: { [key: string]: any } | null | undefined): boolean {
+  if (!runner) {
+    return false;
+  }
+  const page = runner['page'];
+  if (!page) {
+    return false;
+  }
+  if (typeof page.isClosed === 'function') {
+    try {
+      return !page.isClosed();
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function elementExists(page: any, selectors: string[]): Promise<boolean> {
   for (const selector of selectors) {
     try {
       if (selector.startsWith('//')) {
-        // XPath
-        await page.waitForXPath(selector, { timeout });
-        const [element] = await page.$x(selector);
-        if (element) {
-          await (element as any).click();
+        const elements = await page.$x(selector);
+        if (elements && elements.length > 0) {
           return true;
         }
       } else {
-        // CSS selector
-        await page.waitForSelector(selector, { timeout });
-        await page.click(selector);
-        return true;
+        const element = await page.$(selector);
+        if (element) {
+          return true;
+        }
       }
     } catch (e) {
-      // Try next selector
       continue;
     }
   }
@@ -128,29 +432,33 @@ export async function prepareViaSession(
   windowIndex: number = 0,
   headless: boolean = false
 ): Promise<ViaRunner> {
-  const runner = new ViaRunner(via);
+  // Lấy profile trực tiếp từ database - giống hệt ProfileManager.openBrowserProfile()
+  // Đảm bảo sử dụng đúng profile đã tạo trong ProfileDashboard
+  const prisma = getPrismaClient();
+  const profileRaw = await prisma.$queryRawUnsafe<Array<any>>(
+    `SELECT * FROM "Profile" WHERE id = ? AND type = 'VIA' LIMIT 1`,
+    via.id
+  );
   
-  // Override deviceConfig headless setting if specified
-  // Tạo một copy của deviceConfig để không modify original
-  const deviceConfig = JSON.parse(via.deviceConfig);
-  if (headless) {
-    deviceConfig.headless = true;
-  } else {
-    deviceConfig.headless = false; // Đảm bảo không headless nếu không chọn
+  if (!profileRaw || profileRaw.length === 0) {
+    throw new Error(`VIA Profile ${via.id} not found in database`);
   }
-  // Temporarily override deviceConfig trong profile object
-  const originalDeviceConfig = via.deviceConfig;
-  (via as any).deviceConfig = JSON.stringify(deviceConfig);
+  
+  // Sử dụng profile trực tiếp từ database - KHÔNG modify
+  const profile = profileRaw[0];
+  
+  logger.info(`VIA Profile ${profile.id}: Opening Chrome profile at path: ${profile.chromeProfile}`);
+  
+  // Tạo runner với profile từ database (mở trực tiếp Chrome profile đã có sẵn)
+  // chromeProfile path được lấy trực tiếp từ database (không bị thay đổi)
+  const runner = new ViaRunner(profile);
   
   // Tính toán window position giống ProfileManager
   const windowConfig = calculateWindowPosition(windowIndex);
   
-  try {
-    await runner.initialize(windowConfig);
-  } finally {
-    // Restore original deviceConfig
-    (via as any).deviceConfig = originalDeviceConfig;
-  }
+  // Initialize runner với headless override - sẽ mở đúng Chrome profile path từ database
+  // KHÔNG modify profile object, chỉ override headless mode khi initialize
+  await runner.initialize(windowConfig, headless);
 
   if (!runner['page']) {
     throw new Error('Failed to initialize VIA page');
@@ -158,36 +466,119 @@ export async function prepareViaSession(
 
   const page = runner['page'];
 
-  // Bước 1: Vào trang chủ facebook.com, đợi 5s
-  await page.goto('https://www.facebook.com', { waitUntil: 'networkidle2', timeout: 30000 });
-  await new Promise(resolve => setTimeout(resolve, 5000));
+  // Sử dụng cùng flow như ProfileManager.openBrowserProfile() - set cookies trước
+  // Determine base URL and final target URL (giống ProfileManager)
+  let baseUrl: string;
+  let targetUrl: string;
+  baseUrl = 'https://www.facebook.com';
+  targetUrl = baseUrl;
 
-  // Bước 2: Refresh trang một lần
+  // Set cookie (nếu có) - sử dụng cùng helper function và flow như ProfileManager
+  const cookie = (profile as any).cookie;
+  if (cookie && cookie.trim() !== '') {
+    try {
+      // Determine target domain based on profile type (giống ProfileManager)
+      const targetDomain = 'facebook.com';
+      
+      // Parse cookies using same helper function as ProfileManager
+      const cookies = parseCookieString(cookie, targetDomain);
+      
+      if (cookies.length > 0) {
+        // Navigate to base URL first to establish context (giống ProfileManager)
+        await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        
+        // Set cookies with specific domain (giống ProfileManager)
+        await page.setCookie(...cookies);
+        
+        // Also set cookies with .facebook.com domain for cross-subdomain compatibility (giống ProfileManager)
+        const dotDomainCookies = cookies.map(c => ({
+          ...c,
+          domain: '.facebook.com'
+        }));
+        try {
+          await page.setCookie(...dotDomainCookies);
+        } catch (e) {
+          // Some cookies might fail with dot domain, that's okay
+          logger.debug(`VIA Profile ${profile.id}: Some cookies couldn't be set with .facebook.com domain`);
+        }
+        
+        logger.info(`VIA Profile ${profile.id}: Set ${cookies.length} cookies successfully for ${targetDomain}`);
+        
+        // Wait for page to load and then wait 3 seconds to ensure cookies are set (giống ProfileManager)
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        // Reload page to ensure cookies are applied (giống ProfileManager)
+        await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
+        
+        // Verify if logged in
+        const isLoggedIn = await page.evaluate(() => {
+          // @ts-ignore
+          return document.querySelector('[data-testid="blue_bar_profile_link"]') !== null || 
+                 document.querySelector('[aria-label*="Account"]') !== null ||
+                 document.cookie.includes('c_user=');
+        });
+        
+        if (isLoggedIn) {
+          logger.info(`VIA Profile ${profile.id}: Successfully logged in using cookies`);
+          // Already logged in, no need to login with password
+          return runner;
+        } else {
+          logger.warn(`VIA Profile ${profile.id}: Cookies set but login status unclear, will try password login`);
+        }
+      } else {
+        logger.warn(`VIA Profile ${profile.id}: No valid cookies parsed from cookie string`);
+        // Navigate anyway
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      }
+    } catch (cookieError: any) {
+      logger.error(`VIA Profile ${profile.id}: Failed to set cookies:`, cookieError);
+      // Navigate anyway even if cookie setting fails
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    }
+  } else {
+    // No cookie, just navigate (giống ProfileManager)
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  }
+
+  // Sau khi set cookies và navigate, nếu chưa logged in thì mới login với password
+  // Đợi page load hoàn toàn
+  await new Promise(resolve => setTimeout(resolve, 3000));
+
+  // Bước 1: Refresh trang một lần để đảm bảo page đã load
   await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
   await new Promise(resolve => setTimeout(resolve, 2000));
-
-  // Bước 3: Click avatar để hiện form login
-  // CSS: #u_0_3_RL > img._s0._4ooo._1x2_._1ve7._1gax.img
-  // Xpath: //*[@id="u_0_3_RL"]/img[1]
-  const avatarClicked = await waitAndClick(page, [
-    '#u_0_3_RL > img',
-    '//*[@id="u_0_3_RL"]/img[1]',
-  ], 10000);
+//   //*[@id="mount_0_0_Bg"]/div/div[1]/div/div[3]/div/div/div[1]/div[1]/div/div[2]/div/div/div/div[2]/div/div[2]/div  khi refresh trang, nếu như facebook có element này thì đã login thành công, skip đến bước dán link invite
+// const isLoggedIn = await page.evaluate(() => {
+//   // @ts-ignore
+//   .xpath('//*[@id="mount_0_0_Bg"]/div/div[1]/div/div[3]/div/div/div[1]/div[1]/div/div[2]/div/div/div/div[2]/div/div[2]/div')
+//   .build();
+// });
+// if (isLoggedIn) {
+//   logger.info(`VIA Profile ${profile.id}: Successfully logged in using cookies`);
+//   return runner;
+// }
+  // Bước 2: Click avatar để hiện form login
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  const avatarSelectors = selectors()
+    .xpath('/html/body/div[1]/div[1]/div[1]/div/div/div/div[1]/div[4]/div[1]/div/div/a[1]/img')
+    .build();
+  const avatarClicked = await waitAndClick(page, avatarSelectors, 10000);
 
   if (!avatarClicked) {
-    logger.warn('Could not find avatar, trying to find password field directly');
+    logger.warn('Could not find avatar, trying to find username and password field directly');
   } else {
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
 
-  // Bước 4: Điền password từ via.password
-  // CSS: #pass
-  // Xpath: //*[@id="u_0_q_CD"]/div[2]/div[1]/input[1]
-  if (via.password && via.password.trim() !== '') {
-    const passwordTyped = await typeIntoInput(page, [
-      '#pass',
-      '//*[@id="u_0_q_CD"]/div[2]/div[1]/input[1]',
-    ], via.password, 10000);
+  // Bước 3: Điền password từ profile.password (từ database)
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  if (profile.password && profile.password.trim() !== '') {
+    const passwordSelectors = selectors()
+      .css('#pass')
+      .xpath('//*[@id="u_0_q_CD"]/div[2]/div[1]/input[1]')
+      .build();
+    const passwordTyped = await typeIntoInput(page, passwordSelectors, profile.password, 10000);
 
     if (!passwordTyped) {
       throw new Error('Could not find password input field');
@@ -195,10 +586,10 @@ export async function prepareViaSession(
 
     await new Promise(resolve => setTimeout(resolve, 500));
 
-    // Bước 5: Nhấn Enter
+    // Bước 4: Nhấn Enter
     await page.keyboard.press('Enter');
 
-    // Bước 6: Đợi khoảng 5s
+    // Bước 5: Đợi khoảng 5s
     await new Promise(resolve => setTimeout(resolve, 5000));
   } else {
     logger.warn('VIA profile has no password, skipping password login');
@@ -217,29 +608,33 @@ export async function prepareBmSession(
   windowIndex: number = 0,
   headless: boolean = false
 ): Promise<BMRunner> {
-  const runner = new BMRunner(bm);
+  // Lấy profile trực tiếp từ database - giống hệt ProfileManager.openBrowserProfile()
+  // Đảm bảo sử dụng đúng profile đã tạo trong ProfileDashboard
+  const prisma = getPrismaClient();
+  const profileRaw = await prisma.$queryRawUnsafe<Array<any>>(
+    `SELECT * FROM "Profile" WHERE id = ? AND type = 'BM' LIMIT 1`,
+    bm.id
+  );
   
-  // Override deviceConfig headless setting if specified
-  // Tạo một copy của deviceConfig để không modify original
-  const deviceConfig = JSON.parse(bm.deviceConfig);
-  if (headless) {
-    deviceConfig.headless = true;
-  } else {
-    deviceConfig.headless = false; // Đảm bảo không headless nếu không chọn
+  if (!profileRaw || profileRaw.length === 0) {
+    throw new Error(`BM Profile ${bm.id} not found in database`);
   }
-  // Temporarily override deviceConfig trong profile object
-  const originalDeviceConfig = bm.deviceConfig;
-  (bm as any).deviceConfig = JSON.stringify(deviceConfig);
+  
+  // Sử dụng profile trực tiếp từ database - KHÔNG modify
+  const profile = profileRaw[0];
+  
+  logger.info(`BM Profile ${profile.id}: Opening Chrome profile at path: ${profile.chromeProfile}`);
+  
+  // Tạo runner với profile từ database (mở trực tiếp Chrome profile đã có sẵn)
+  // chromeProfile path được lấy trực tiếp từ database (không bị thay đổi)
+  const runner = new BMRunner(profile);
   
   // Tính toán window position giống ProfileManager
   const windowConfig = calculateWindowPosition(windowIndex);
   
-  try {
-    await runner.initialize(windowConfig);
-  } finally {
-    // Restore original deviceConfig
-    (bm as any).deviceConfig = originalDeviceConfig;
-  }
+  // Initialize runner với headless override - sẽ mở đúng Chrome profile path từ database
+  // KHÔNG modify profile object, chỉ override headless mode khi initialize
+  await runner.initialize(windowConfig, headless);
 
   if (!runner['page']) {
     throw new Error('Failed to initialize BM page');
@@ -247,41 +642,310 @@ export async function prepareBmSession(
 
   const page = runner['page'];
 
-  // Bước 1: Navigate đến base URL (facebook.com)
-  await page.goto('https://www.facebook.com', { waitUntil: 'networkidle2', timeout: 30000 });
-
-  // Bước 2: Đợi 2 giây (để page load)
-  await new Promise(resolve => setTimeout(resolve, 2000));
-
-  // Bước 3: Đợi thêm 3 giây (tổng 5 giây)
-  await new Promise(resolve => setTimeout(resolve, 3000));
-
-  // Bước 4: Set cookie (nếu có)
-  const cookie = (bm as any).cookie;
-  if (cookie && cookie.trim() !== '') {
-    try {
-      const cookies = runner['parseCookieString'](cookie);
-      await page.setCookie(...cookies);
-      logger.info(`BM Profile ${bm.id}: Set ${cookies.length} cookies`);
-    } catch (e) {
-      logger.warn('Failed to set cookies for BM profile:', e);
+  // Sử dụng cùng flow như ProfileManager.openBrowserProfile()
+  // Determine base URL and final target URL (giống ProfileManager)
+  let baseUrl: string;
+  let targetUrl: string;
+  if (profile.type === 'BM') {
+    baseUrl = 'https://www.facebook.com'; // Navigate to facebook.com first to set cookies
+    const bmUid = (profile as any).bmUid;
+    if (bmUid && bmUid.trim() !== '') {
+      targetUrl = `https://business.facebook.com/latest/home?nav_ref=bm_home_redirect&business_id=${bmUid.trim()}`;
+    } else {
+      targetUrl = 'https://business.facebook.com';
     }
+  } else {
+    baseUrl = 'https://www.facebook.com';
+    targetUrl = baseUrl;
   }
 
-  // Bước 5: Reload page để đảm bảo cookie được apply
+  // Set cookie (nếu có) - sử dụng cùng helper function và flow như ProfileManager
+  const cookie = (profile as any).cookie;
+  if (cookie && cookie.trim() !== '') {
+    try {
+      // Determine target domain based on profile type (giống ProfileManager)
+      const targetDomain = profile.type === 'BM' ? 'business.facebook.com' : 'facebook.com';
+      
+      // Parse cookies using same helper function as ProfileManager
+      const cookies = parseCookieString(cookie, targetDomain);
+      
+      if (cookies.length > 0) {
+        // Navigate to base URL first to establish context (giống ProfileManager)
+        await page.goto('https://www.facebook.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
+        
+        // Set cookies with specific domain (giống ProfileManager)
+        await page.setCookie(...cookies);
+        
+        // Also set cookies with .facebook.com domain for cross-subdomain compatibility (giống ProfileManager)
+        const dotDomainCookies = cookies.map(c => ({
+          ...c,
+          domain: '.facebook.com'
+        }));
+        try {
+          await page.setCookie(...dotDomainCookies);
+        } catch (e) {
+          // Some cookies might fail with dot domain, that's okay
+          logger.debug(`BM Profile ${profile.id}: Some cookies couldn't be set with .facebook.com domain`);
+        }
+        
+        logger.info(`BM Profile ${profile.id}: Set ${cookies.length} cookies successfully for ${targetDomain}`);
+        
+        // Wait for page to load and then wait 3 seconds to ensure cookies are set (giống ProfileManager)
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        // Reload page to ensure cookies are applied (giống ProfileManager)
+        await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
+        
+        // Now navigate to the target URL (with business_id if available) - giống ProfileManager
+        if (targetUrl !== baseUrl) {
+          await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+          const bmUid = (profile as any).bmUid;
+          if (bmUid && bmUid.trim() !== '') {
+            logger.info(`BM Profile ${profile.id}: Navigated to BM dashboard with business_id=${bmUid}`);
+          }
+        }
+      } else {
+        logger.warn(`BM Profile ${profile.id}: No valid cookies parsed from cookie string`);
+        // Navigate anyway
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      }
+    } catch (cookieError: any) {
+      logger.error(`BM Profile ${profile.id}: Failed to set cookies:`, cookieError);
+      // Navigate anyway even if cookie setting fails
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    }
+  } else {
+    // No cookie, just navigate (giống ProfileManager)
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  }
+
+  return runner;
+}
+
+/**
+ * Test Mode: Mở VIA và BM profiles đến các bước được chỉ định để test selectors
+ * - VIA: Chạy đến bước click avatar (sau khi set cookies và reload)
+ * - BM: Chạy đến bước set cookies và navigate xong
+ * Sau đó treo nguyên browser để user có thể test và lấy lại elements
+ */
+export async function testAutoBmProfiles(
+  via: Profile & { password?: string | null },
+  bm: Profile & { bmUid?: string | null },
+  headless: boolean = false
+): Promise<{ viaRunner: ViaRunner; bmRunner: BMRunner }> {
+  logger.info('🧪 Test Mode: Opening VIA and BM profiles for testing...');
+
+  // Prepare VIA session - chỉ đến bước click avatar
+  const viaRunner = await prepareViaSessionForTest(via, 0, headless);
+  logger.info(`✅ VIA Profile ${via.id}: Opened and ready for testing (at avatar click step)`);
+
+  // Prepare BM session - chỉ đến bước set cookies và navigate xong
+  const bmRunner = await prepareBmSessionForTest(bm, 1, headless);
+  logger.info(`✅ BM Profile ${bm.id}: Opened and ready for testing (at cookies set step)`);
+
+  logger.info('🎯 Test Mode: Both browsers are open and ready. You can now test selectors.');
+  logger.info('⚠️  Note: Browsers will remain open. Close them manually when done testing.');
+
+  return { viaRunner, bmRunner };
+}
+
+/**
+ * Prepare VIA session for testing - chỉ đến bước click avatar
+ */
+async function prepareViaSessionForTest(
+  via: Profile & { password?: string | null },
+  windowIndex: number = 0,
+  headless: boolean = false
+): Promise<ViaRunner> {
+  // Lấy profile trực tiếp từ database
+  const prisma = getPrismaClient();
+  const profileRaw = await prisma.$queryRawUnsafe<Array<any>>(
+    `SELECT * FROM "Profile" WHERE id = ? AND type = 'VIA' LIMIT 1`,
+    via.id
+  );
+
+  if (!profileRaw || profileRaw.length === 0) {
+    throw new Error(`VIA Profile ${via.id} not found in database`);
+  }
+
+  const profile = profileRaw[0];
+  logger.info(`VIA Profile ${profile.id}: Opening Chrome profile at path: ${profile.chromeProfile}`);
+
+  const runner = new ViaRunner(profile);
+  const windowConfig = calculateWindowPosition(windowIndex);
+  await runner.initialize(windowConfig, headless);
+
+  if (!runner['page']) {
+    throw new Error('Failed to initialize VIA page');
+  }
+
+  const page = runner['page'];
+
+  // Set cookies và navigate (giống prepareViaSession)
+  let baseUrl: string;
+  let targetUrl: string;
+  baseUrl = 'https://www.facebook.com';
+  targetUrl = baseUrl;
+
+  const cookie = (profile as any).cookie;
+  if (cookie && cookie.trim() !== '') {
+    try {
+      const targetDomain = 'facebook.com';
+      const cookies = parseCookieString(cookie, targetDomain);
+
+      if (cookies.length > 0) {
+        await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.setCookie(...cookies);
+
+        const dotDomainCookies = cookies.map(c => ({
+          ...c,
+          domain: '.facebook.com'
+        }));
+        try {
+          await page.setCookie(...dotDomainCookies);
+        } catch (e) {
+          logger.debug(`VIA Profile ${profile.id}: Some cookies couldn't be set with .facebook.com domain`);
+        }
+
+        logger.info(`VIA Profile ${profile.id}: Set ${cookies.length} cookies successfully for ${targetDomain}`);
+
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise(resolve => setTimeout(resolve, 3000));
+
+        await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
+
+        const isLoggedIn = await page.evaluate(() => {
+          // @ts-ignore
+          return document.querySelector('[data-testid="blue_bar_profile_link"]') !== null || 
+                 document.querySelector('[aria-label*="Account"]') !== null ||
+                 document.cookie.includes('c_user=');
+        });
+
+        if (isLoggedIn) {
+          logger.info(`VIA Profile ${profile.id}: Successfully logged in using cookies`);
+          return runner;
+        } else {
+          logger.warn(`VIA Profile ${profile.id}: Cookies set but login status unclear, will try password login`);
+        }
+      } else {
+        logger.warn(`VIA Profile ${profile.id}: No valid cookies parsed from cookie string`);
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      }
+    } catch (cookieError: any) {
+      logger.error(`VIA Profile ${profile.id}: Failed to set cookies:`, cookieError);
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    }
+  } else {
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  }
+
+  // Đợi page load và reload
+  await new Promise(resolve => setTimeout(resolve, 3000));
   await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
   await new Promise(resolve => setTimeout(resolve, 2000));
 
-  // Bước 6 & 7: Navigate đến URL với business_id đã được lưu
-  const bmUid = bm.bmUid;
-  if (bmUid && bmUid.trim() !== '') {
-    const targetUrl = `https://business.facebook.com/latest/home?nav_ref=bm_home_redirect&business_id=${bmUid.trim()}`;
-    await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-    logger.info(`BM Profile ${bm.id}: Navigated to BM dashboard with business_id=${bmUid}`);
-  } else {
-    await page.goto('https://business.facebook.com', { waitUntil: 'networkidle2', timeout: 30000 });
-    logger.warn(`BM Profile ${bm.id}: No bmUid set, navigating to business.facebook.com`);
+  // DỪNG Ở ĐÂY - Chỉ đến bước click avatar, không click
+  logger.info(`VIA Profile ${profile.id}: Ready at avatar click step. You can now test selectors.`);
+
+  return runner;
+}
+
+/**
+ * Prepare BM session for testing - chỉ đến bước set cookies và navigate xong
+ */
+async function prepareBmSessionForTest(
+  bm: Profile & { bmUid?: string | null },
+  windowIndex: number = 0,
+  headless: boolean = false
+): Promise<BMRunner> {
+  // Lấy profile trực tiếp từ database
+  const prisma = getPrismaClient();
+  const profileRaw = await prisma.$queryRawUnsafe<Array<any>>(
+    `SELECT * FROM "Profile" WHERE id = ? AND type = 'BM' LIMIT 1`,
+    bm.id
+  );
+
+  if (!profileRaw || profileRaw.length === 0) {
+    throw new Error(`BM Profile ${bm.id} not found in database`);
   }
+
+  const profile = profileRaw[0];
+  logger.info(`BM Profile ${profile.id}: Opening Chrome profile at path: ${profile.chromeProfile}`);
+
+  const runner = new BMRunner(profile);
+  const windowConfig = calculateWindowPosition(windowIndex);
+  await runner.initialize(windowConfig, headless);
+
+  if (!runner['page']) {
+    throw new Error('Failed to initialize BM page');
+  }
+
+  const page = runner['page'];
+
+  // Set cookies và navigate (giống prepareBmSession)
+  let baseUrl: string;
+  let targetUrl: string;
+  if (profile.type === 'BM') {
+    baseUrl = 'https://www.facebook.com';
+    const bmUid = (profile as any).bmUid;
+    if (bmUid && bmUid.trim() !== '') {
+      targetUrl = `https://business.facebook.com/latest/home?nav_ref=bm_home_redirect&business_id=${bmUid.trim()}`;
+    } else {
+      targetUrl = 'https://business.facebook.com';
+    }
+  } else {
+    baseUrl = 'https://www.facebook.com';
+    targetUrl = baseUrl;
+  }
+
+  const cookie = (profile as any).cookie;
+  if (cookie && cookie.trim() !== '') {
+    try {
+      const targetDomain = profile.type === 'BM' ? 'business.facebook.com' : 'facebook.com';
+      const cookies = parseCookieString(cookie, targetDomain);
+
+      if (cookies.length > 0) {
+        await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.setCookie(...cookies);
+
+        const dotDomainCookies = cookies.map(c => ({
+          ...c,
+          domain: '.facebook.com'
+        }));
+        try {
+          await page.setCookie(...dotDomainCookies);
+        } catch (e) {
+          logger.debug(`BM Profile ${profile.id}: Some cookies couldn't be set with .facebook.com domain`);
+        }
+
+        logger.info(`BM Profile ${profile.id}: Set ${cookies.length} cookies successfully for ${targetDomain}`);
+
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
+
+        if (targetUrl !== baseUrl) {
+          await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+          const bmUid = (profile as any).bmUid;
+          if (bmUid && bmUid.trim() !== '') {
+            logger.info(`BM Profile ${profile.id}: Navigated to BM dashboard with business_id=${bmUid}`);
+          }
+        }
+      } else {
+        logger.warn(`BM Profile ${profile.id}: No valid cookies parsed from cookie string`);
+        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      }
+    } catch (cookieError: any) {
+      logger.error(`BM Profile ${profile.id}: Failed to set cookies:`, cookieError);
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    }
+  } else {
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  }
+
+  // DỪNG Ở ĐÂY - Đã set cookies và navigate xong
+  logger.info(`BM Profile ${profile.id}: Ready at cookies set step. You can now test selectors.`);
 
   return runner;
 }
@@ -301,30 +965,43 @@ export async function viaHandleInviteAndExtractIds(
 
   // Bước 1: Paste link invite từ database, click vào accept block
   await page.goto(inviteLink, { waitUntil: 'networkidle2', timeout: 30000 });
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  // await new Promise(resolve => setTimeout(resolve, 3000));
 
-  // Click block accept đầu tiên
-  // CSS: #login-panel-container > div.x1ey2m1c... (dài)
-  // Xpath: //*[@id="login-panel-container"]/div/div/div/div[3]/div/div/div hoặc //*[@id="login-panel-container"]/div/div/div/div[3]/div/div
-  const acceptBlockClicked = await waitAndClick(page, [
-    '//*[@id="login-panel-container"]/div/div/div/div[3]/div/div/div',
-    '//*[@id="login-panel-container"]/div/div/div/div[3]/div/div',
-    '#login-panel-container > div > div > div > div:nth-of-type(3) > div > div',
-  ], 15000);
+  // // Đợi page load hoàn toàn
+  // await new Promise(resolve => setTimeout(resolve, 2000));
 
-  if (!acceptBlockClicked) {
-    logger.warn('Could not find accept block, continuing...');
+  // Bước 1.5: Click "Login Facebook" hoặc "Continue with Facebook" button (nếu có)
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  const loginFacebookSelectors = selectors()
+    .css('div#login-panel-container > div.x1ey2m1c:nth-of-type(1) > div.x1n2onr6:nth-of-type(1) > div.x9f619:nth-of-type(1) > div.x9f619:nth-of-type(3) > div.x3nfvp2:nth-of-type(1) > div.x1i10hfl:nth-of-type(1) > div.x1ja2u2z:nth-of-type(1) > div.html-div:nth-of-type(1) > div.x9f619:nth-of-type(2) > span.x1lliihq:nth-of-type(1) > span.x1lliihq:nth-of-type(1)')
+    .xpath('//*[@id="login-panel-container"]/div[1]/div[1]/div[1]/div[3]/div[1]/div[1]/div[1]/div[1]/div[2]/span[1]/span[1]')
+    .build();
+
+  const loginFacebookClicked = await waitAndClick(page, loginFacebookSelectors, 15000);
+
+  if (loginFacebookClicked) {
+    logger.info('Clicked "Login" button');
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  } else {
+    logger.warn('Could not find "Login" button, continuing...');
   }
 
-  await new Promise(resolve => setTimeout(resolve, 2000));
-
   // Bước 2: Điền first name & last name
-  // First name 'ok': CSS: #js_5, Xpath: //*[@id="js_5"]
-  // Last name 'oka': CSS: #js_a, Xpath: //*[@id="js_a"]
-  const firstNameTyped = await typeIntoInput(page, [
-    '#js_5',
-    '//*[@id="js_5"]',
-  ], 'ok', 10000);
+  const rawFirstName = randomFirstName();
+  const rawLastName = randomLastName();
+  const firstNameValue =
+    typeof rawFirstName === 'string' && rawFirstName.trim().length > 0 ? rawFirstName.trim() : 'Ok';
+  const lastNameValue =
+    typeof rawLastName === 'string' && rawLastName.trim().length > 0 ? rawLastName.trim() : 'Oka';
+
+  logger.info(`Using VIA name: ${firstNameValue} ${lastNameValue}`);
+
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  const firstNameSelectors = selectors()
+    .css('#js_5')
+    .xpath('//*[@id="js_5"]')
+    .build();
+  const firstNameTyped = await typeIntoInput(page, firstNameSelectors, firstNameValue, 10000);
 
   if (!firstNameTyped) {
     logger.warn('Could not find first name input');
@@ -332,10 +1009,11 @@ export async function viaHandleInviteAndExtractIds(
 
   await new Promise(resolve => setTimeout(resolve, 500));
 
-  const lastNameTyped = await typeIntoInput(page, [
-    '#js_a',
-    '//*[@id="js_a"]',
-  ], 'oka', 10000);
+  const lastNameSelectors = selectors()
+    .css('#js_a')
+    .xpath('//*[@id="js_a"]')
+    .build();
+  const lastNameTyped = await typeIntoInput(page, lastNameSelectors, lastNameValue, 10000);
 
   if (!lastNameTyped) {
     logger.warn('Could not find last name input');
@@ -344,10 +1022,12 @@ export async function viaHandleInviteAndExtractIds(
   await new Promise(resolve => setTimeout(resolve, 1000));
 
   // Bước 3: Bấm continue lần 1
-  // Xpath: //*[@id="globalContainer"]/div/div/div/div[2]/div/div/div/div[1]/div[3]/div[3]/span/div/div/div[1]
-  const continue1Clicked = await waitAndClick(page, [
-    '//*[@id="globalContainer"]/div/div/div/div[2]/div/div/div/div[1]/div[3]/div[3]/span/div/div/div[1]',
-  ], 10000);
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  const continue1Selectors = selectors()
+    .xpath('//*[@id="js_t"]/span[1]/div[1]/div[1]/div[1]')
+    .xpath('//*[@id="globalContainer"]/div/div/div/div[2]/div/div/div/div[1]/div[3]/div[3]/span/div/div/div[1]')
+    .build();
+  const continue1Clicked = await waitAndClick(page, continue1Selectors, 10000);
 
   if (continue1Clicked) {
     await new Promise(resolve => setTimeout(resolve, 2000));
@@ -356,12 +1036,13 @@ export async function viaHandleInviteAndExtractIds(
   }
 
   // Bước 4: Continue tiếp
-  // Xpath: //*[@id="globalContainer"]/div/div/div/div[2]/div/div/div/div[1]/div[3]/div[3]/span/div/div/div[1]
-  // hoặc //*[@id="globalContainer"]/div/div/div/div[2]/div/div/div/div[1]/div[3]/div[3]
-  const continue2Clicked = await waitAndClick(page, [
-    '//*[@id="globalContainer"]/div/div/div/div[2]/div/div/div/div[1]/div[3]/div[3]/span/div/div/div[1]',
-    '//*[@id="globalContainer"]/div/div/div/div[2]/div/div/div/div[1]/div[3]/div[3]',
-  ], 10000);
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  const continue2Selectors = selectors()
+    .xpath('//*[@id="globalContainer"]/div/div/div/div[2]/div/div/div/div[1]/div[3]/div[3]/span/div/div/div[1]')
+    .xpath('//*[@id="js_t"]/span[1]/div[1]/div[1]/div[1]')
+    .xpath('//*[@id="globalContainer"]/div/div/div/div[2]/div/div/div/div[1]/div[3]/div[3]')
+    .build();
+  const continue2Clicked = await waitAndClick(page, continue2Selectors, 10000);
 
   if (continue2Clicked) {
     await new Promise(resolve => setTimeout(resolve, 2000));
@@ -370,15 +1051,31 @@ export async function viaHandleInviteAndExtractIds(
   }
 
   // Bước 5: Accept invitation
-  // Xpath: //*[@id="globalContainer"]/div/div/div/div[2]/div/div/div/div[1]/div[3]/div[3]/div
-  const acceptClicked = await waitAndClick(page, [
-    '//*[@id="globalContainer"]/div/div/div/div[2]/div/div/div/div[1]/div[3]/div[3]/div',
-  ], 10000);
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  const acceptSelectors = selectors()
+    .xpath('//*[@id="globalContainer"]/div/div/div/div[2]/div/div/div/div[1]/div[3]/div[3]/div')
+    .build();
+  const acceptClicked = await waitAndClick(page, acceptSelectors, 10000);
 
   if (acceptClicked) {
     await new Promise(resolve => setTimeout(resolve, 3000));
   } else {
     logger.warn('Could not find accept invitation button');
+  }
+
+  const postAcceptBlockSelectors = selectors()
+    .xpath('//*[@id="globalContainer"]/div[1]/div[1]/div[1]/div[2]/div[1]/div[1]')
+    .css('div#globalContainer > div:nth-of-type(1) > div:nth-of-type(1) > div.x78zum5:nth-of-type(1) > div.x6s0dn4:nth-of-type(2) > div:nth-of-type(1) > div.x78zum5:nth-of-type(1)')
+    .build();
+
+  const blockDetected = await elementExists(page, postAcceptBlockSelectors);
+
+  if (blockDetected) {
+    logger.warn('Detected block screen after accepting invite, skipping to next link');
+    await new Promise(resolve => setTimeout(resolve, 30000));
+
+    throw new Error('Invite blocked after accept, continue with next link');
+    
   }
 
   // Bước 6: Đợi khi nào page chuyển qua thành
@@ -417,53 +1114,28 @@ export async function viaHandleInviteAndExtractIds(
   try {
     await page.waitForSelector('#js_6g', { timeout: 15000 });
     await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    // Try to get text from #js_6g > a first
-    viaAdAccountUid = await page.evaluate(() => {
-      const element = document.querySelector('#js_6g > a') || document.querySelector('#js_6g');
-      if (element) {
-        // Try textContent first
-        let text = element.textContent?.trim() || '';
-        // If no text, try href
-        if (!text && element.getAttribute('href')) {
-          const href = element.getAttribute('href') || '';
-          const match = href.match(/act=(\d+)/);
-          if (match) {
-            text = match[1];
-          }
-        }
-        // If still no text, try innerText
-        if (!text) {
-          text = (element as HTMLElement).innerText?.trim() || '';
-        }
-        return text;
-      }
-      return '';
-    });
+
+    const viaAdAccountXPath =
+      '/html/body/div[1]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div[2]/div/div[1]/div/div[1]/div/div[2]/div[2]/div/a';
+
+    const viaAdAccountSelectors = selectors()
+      .xpath(viaAdAccountXPath)
+      .build();
+
+    const viaAdAccountClicked = await waitAndClick(page, viaAdAccountSelectors, 10000);
+
+    if (!viaAdAccountClicked) {
+      throw new Error('Could not click Via-UID-Ad-Account element for manual copy');
+    }
+
+    viaAdAccountUid = await readClipboardText(page);
 
     if (!viaAdAccountUid) {
-      // Try xpath
-      const [element] = await (page as any).$x('//*[@id="js_6g"]/a | //*[@id="js_6g"]');
-      if (element) {
-        viaAdAccountUid = await page.evaluate((el) => {
-          let text = el.textContent?.trim() || '';
-          if (!text && el.getAttribute('href')) {
-            const href = el.getAttribute('href') || '';
-            const match = href.match(/act=(\d+)/);
-            if (match) {
-              text = match[1];
-            }
-          }
-          if (!text) {
-            text = (el as HTMLElement).innerText?.trim() || '';
-          }
-          return text;
-        }, element);
-      }
+      viaAdAccountUid = await selectAndCopyByXPath(page, viaAdAccountXPath);
     }
 
     if (!viaAdAccountUid) {
-      throw new Error('Could not extract Via-UID-Ad-Account from element');
+      throw new Error('Could not copy Via-UID-Ad-Account from element');
     }
 
     logger.info(`Extracted Via-UID-Ad-Account: ${viaAdAccountUid}`);
@@ -497,12 +1169,13 @@ export async function bmAddAdAccountAndSetRole(
   await new Promise(resolve => setTimeout(resolve, 3000));
 
   // Bước 2: Nhấn vào +Add
-  // Xpath: //*[@id="mount_0_0_MY"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[1]/div/div/div/div/div/div[2]/div[3]/div
-  // hoặc //*[@id="mount_0_0_MY"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[1]/div/div/div/div/div/div[2]/div[3]/div/span/div/div
-  const addClicked = await waitAndClick(page, [
-    '//*[@id="mount_0_0_MY"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[1]/div/div/div/div/div/div[2]/div[3]/div',
-    '//*[@id="mount_0_0_MY"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[1]/div/div/div/div/div/div[2]/div[3]/div/span/div/div',
-  ], 15000);
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  const addSelectors = selectors()
+    .xpath('//*[@id="mount_0_0_MY"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[1]/div/div/div/div/div/div[2]/div[3]/div')
+    .xpath('//*[@id="mount_0_0_MY"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[1]/div/div/div/div/div/div[2]/div[3]/div/span/div/div')
+    .xpath('/html/body/div[1]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[1]/div/div/div/div/div/div[2]/div[3]/div')
+    .build();
+  const addClicked = await waitAndClick(page, addSelectors, 15000);
 
   if (!addClicked) {
     // Try finding by text "Add" or "+"
@@ -526,15 +1199,16 @@ export async function bmAddAdAccountAndSetRole(
   }
 
   // Bước 3: Click vào "Add an ad account"
-  // CSS: #js_7l hoặc #js_7m
-  // Xpath: //*[@id="js_7m"] hoặc //*[@id="js_7l"] hoặc //*[@id="js_7k"]/div/div/div/div/div/div
-  const addAdAccountClicked = await waitAndClick(page, [
-    '#js_7l',
-    '#js_7m',
-    '//*[@id="js_7m"]',
-    '//*[@id="js_7l"]',
-    '//*[@id="js_7k"]/div/div/div/div/div/div',
-  ], 10000);
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  const addAdAccountSelectors = selectors()
+    .css('#js_7l')
+    .css('#js_7m')
+    .xpath('//*[@id="js_7m"]')
+    .xpath('//*[@id="js_7l"]')
+    .xpath('//*[@id="js_7k"]/div/div/div/div/div/div')
+    .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div[2]/div[1]/div[2]/div/div[2]/div[2]/div[3]/div/div/div/div/div/div/div/div/div/div/div[3]/div[2]')
+    .build();
+  const addAdAccountClicked = await waitAndClick(page, addAdAccountSelectors, 10000);
 
   if (!addAdAccountClicked) {
     throw new Error('Could not find "Add an ad account" option');
@@ -543,12 +1217,12 @@ export async function bmAddAdAccountAndSetRole(
   await new Promise(resolve => setTimeout(resolve, 2000));
 
   // Bước 4: Nhập Via-UID-Ad-Account vừa nhận được vào:
-  // CSS: #js_8m
-  // Xpath: //*[@id="js_8m"]
-  const accountIdTyped = await typeIntoInput(page, [
-    '#js_8m',
-    '//*[@id="js_8m"]',
-  ], viaAdAccountUid, 10000);
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  const accountIdSelectors = selectors()
+    .css('#js_8m')
+    .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[2]/div[1]/div[2]/div[2]/div[1]/div[2]/div/div/div/div[1]/div[2]/div/div/input')
+    .build();
+  const accountIdTyped = await typeIntoInput(page, accountIdSelectors, viaAdAccountUid, 10000);
 
   if (!accountIdTyped) {
     throw new Error('Could not find ad account input field');
@@ -557,12 +1231,14 @@ export async function bmAddAdAccountAndSetRole(
   await new Promise(resolve => setTimeout(resolve, 1000));
 
   // Sau đó nhấn next
-  // Xpath: //*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div[2]/div
-  // hoặc //*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div[2]/div/span/div/div
-  const nextClicked = await waitAndClick(page, [
-    '//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div[2]/div',
-    '//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div[2]/div/span/div/div',
-  ], 10000);
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  const nextSelectors = selectors()
+    .xpath('//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div[2]/div')
+    .xpath('//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div[2]/div/span/div/div')
+    .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div[2]/div/span/div/div/div')
+    .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div[2]/div/span')
+    .build();
+  const nextClicked = await waitAndClick(page, nextSelectors, 10000);
 
   if (!nextClicked) {
     // Try finding by text "Next"
@@ -584,15 +1260,15 @@ export async function bmAddAdAccountAndSetRole(
   await new Promise(resolve => setTimeout(resolve, 2000));
 
   // Bước 5: Click vào để toggle full access role
-  // Xpath: //*[@id="js_95"]
-  // hoặc //*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[2]/div[1]/div[3]/div/div[2]/div/div[2]/div/div/div/div/span/div/div[1]/div/div[1]
-  // hoặc //*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[2]/div[1]/div[3]/div/div[2]/div/div[2]/div/div/div/div/span/div/div[1]/div/div[2]
-  const toggleClicked = await waitAndClick(page, [
-    '#js_95',
-    '//*[@id="js_95"]',
-    '//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[2]/div[1]/div[3]/div/div[2]/div/div[2]/div/div/div/div/span/div/div[1]/div/div[1]',
-    '//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[2]/div[1]/div[3]/div/div[2]/div/div[2]/div/div/div/div/span/div/div[1]/div/div[2]',
-  ], 10000);
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  const toggleSelectors = selectors()
+    .css('#js_95')
+    .xpath('//*[@id="js_95"]')
+    .xpath('//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[2]/div[1]/div[3]/div/div[2]/div/div[2]/div/div/div/div/span/div/div[1]/div/div[1]')
+    .xpath('//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[2]/div[1]/div[3]/div/div[2]/div/div[2]/div/div/div/div/span/div/div[1]/div/div[2]')
+    .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[2]/div[1]/div[3]/div[2]/div[2]/div/div[2]/div/div/div/div/span/div/div[1]/input')
+    .build();
+  const toggleClicked = await waitAndClick(page, toggleSelectors, 10000);
 
   if (!toggleClicked) {
     logger.warn('Could not find full access toggle');
@@ -601,12 +1277,13 @@ export async function bmAddAdAccountAndSetRole(
   }
 
   // Sau đó, click confirm để hoàn thành
-  // CSS: #js_8y hoặc #js_8y > span.x1vvvo52...
-  // Xpath: //*[@id="js_8y"]/span/div/div/div
-  const confirmClicked = await waitAndClick(page, [
-    '#js_8y',
-    '//*[@id="js_8y"]/span/div/div/div',
-  ], 10000);
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  const confirmSelectors = selectors()
+    .css('#js_8y')
+    .xpath('//*[@id="js_8y"]/span/div/div/div')
+    .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div[2]/div/span/div/div/div')
+    .build();
+  const confirmClicked = await waitAndClick(page, confirmSelectors, 10000);
 
   if (!confirmClicked) {
     logger.warn('Could not find confirm button');
@@ -615,12 +1292,12 @@ export async function bmAddAdAccountAndSetRole(
   }
 
   // Bước 6: Click done để hoàn tất
-  // Xpath: //*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div/div
-  // hoặc //*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div/div/span/div/div/div
-  const doneClicked = await waitAndClick(page, [
-    '//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div/div',
-    '//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div/div/span/div/div/div',
-  ], 10000);
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  const doneSelectors = selectors()
+    .xpath('//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div/div')
+    .xpath('//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div/div/span/div/div/div')
+    .build();
+  const doneClicked = await waitAndClick(page, doneSelectors, 10000);
 
   if (!doneClicked) {
     // Try finding by text "Done"
@@ -664,15 +1341,15 @@ export async function viaApproveRoleSetup(
   await new Promise(resolve => setTimeout(resolve, 3000));
 
   // Đợi load xong, click vào request trong bảng
-  // Xpath: //*[@id="mount_0_0_OJ"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div/div/div/div/table/tbody/tr
-  // hoặc //*[@id="mount_0_0_1J"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div/div/div/div/table/tbody/tr/td[1]
-  // hoặc //*[@id="mount_0_0_1J"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div/div/div/div/table/tbody/tr/td[2]
-  const requestRowClicked = await waitAndClick(page, [
-    '//table/tbody/tr[1]',
-    '//*[@id="mount_0_0_OJ"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div/div/div/div/table/tbody/tr',
-    '//*[@id="mount_0_0_1J"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div/div/div/div/table/tbody/tr/td[1]',
-    '//*[@id="mount_0_0_1J"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div/div/div/div/table/tbody/tr/td[2]',
-  ], 15000);
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  const requestRowSelectors = selectors()
+    .xpath('/html/body/div[1]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div/div/div/div/table/tbody/tr/td[1]/div/div/div/span')
+    .xpath('//table/tbody/tr[1]')
+    .xpath('//*[@id="mount_0_0_OJ"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div/div/div/div/table/tbody/tr')
+    .xpath('//*[@id="mount_0_0_1J"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div/div/div/div/table/tbody/tr/td[1]')
+    .xpath('//*[@id="mount_0_0_1J"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div/div/div/div/table/tbody/tr/td[2]')
+    .build();
+  const requestRowClicked = await waitAndClick(page, requestRowSelectors, 15000);
 
   if (!requestRowClicked) {
     throw new Error('Could not find request in table');
@@ -681,13 +1358,14 @@ export async function viaApproveRoleSetup(
   await new Promise(resolve => setTimeout(resolve, 2000));
 
   // Bước 2: Chọn approve
-  // Xpath: //*[@id="mount_0_0_1J"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div[2]/div/div/div/div[1]/div/div[2]/div/div[2]/div
-  // hoặc //*[@id="mount_0_0_1J"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div[2]/div/div/div/div[1]/div/div[2]/div/div[2]/div/span/div/div/div
-  const approveClicked = await waitAndClick(page, [
-    '//div[contains(text(), "Approve")]',
-    '//*[@id="mount_0_0_1J"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div[2]/div/div/div/div[1]/div/div[2]/div/div[2]/div',
-    '//*[@id="mount_0_0_1J"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div[2]/div/div/div/div[1]/div/div[2]/div/div[2]/div/span/div/div/div',
-  ], 15000);
+  // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
+  const approveSelectors = selectors()
+    .xpath('/html/body/div[1]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div[2]/div/div/div/div[1]/div/div[2]/div/div[2]/div/span/div/div/div')
+    .xpath('//div[contains(text(), "Approve")]')
+    .xpath('//*[@id="mount_0_0_1J"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div[2]/div/div/div/div[1]/div/div[2]/div/div[2]/div')
+    .xpath('//*[@id="mount_0_0_1J"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div[2]/div/div/div/div[1]/div/div[2]/div/div[2]/div/span/div/div/div')
+    .build();
+  const approveClicked = await waitAndClick(page, approveSelectors, 15000);
 
   if (!approveClicked) {
     throw new Error('Could not find Approve button');
@@ -709,6 +1387,12 @@ export async function runAutoBmScript(opts: AutoBmOptions): Promise<void> {
 
   const bmUid = bm.bmUid.trim();
 
+  const viaRunnerMap = new Map<number, ViaRunner>();
+  const viaWindowIndexMap = new Map<number, number>();
+  vias.forEach((via, idx) => {
+    viaWindowIndexMap.set(via.id, idx + 1);
+  });
+
   // Chia inviteLinks cho các VIA theo round-robin
   const viaTasks: Array<{ via: Profile; link: string; index: number }> = [];
   inviteLinks.forEach((link, index) => {
@@ -724,6 +1408,27 @@ export async function runAutoBmScript(opts: AutoBmOptions): Promise<void> {
   const viaPairs: Array<Array<Profile>> = [];
   for (let i = 0; i < vias.length; i += BM_RATE_LIMIT_PER_ROUND) {
     viaPairs.push(vias.slice(i, i + BM_RATE_LIMIT_PER_ROUND));
+  }
+
+  const activeViaIds = new Set<number>(viaTasks.map(task => task.via.id));
+
+  for (const via of vias) {
+    if (!activeViaIds.has(via.id)) {
+      continue;
+    }
+
+    const windowIndex =
+      viaWindowIndexMap.get(via.id) ??
+      (1 + Math.max(0, vias.findIndex((v) => v.id === via.id)));
+
+    try {
+      logger.info(`Preparing VIA session (initial) for profile ${via.id}`);
+      const viaRunner = await prepareViaSession(via as any, windowIndex, headless);
+      viaRunnerMap.set(via.id, viaRunner);
+    } catch (initError: any) {
+      logger.error(`Failed to prepare VIA session for profile ${via.id}: ${initError.message || initError}`);
+      // Leave entry absent; corresponding tasks will fail with clear error
+    }
   }
 
   // Prepare BM session một lần (window index 0)
@@ -770,8 +1475,7 @@ export async function runAutoBmScript(opts: AutoBmOptions): Promise<void> {
         }
 
         const taskId = `${task.via.id}-${task.index}-${Date.now()}`;
-        const legacyUid = (task.via as any).uid;
-        const viaUid = task.via.username || legacyUid || '';
+        const viaUid = (task.via as any).username || (task.via as any).uid || '';
 
         const result: TaskResult = {
           id: taskId,
@@ -788,11 +1492,35 @@ export async function runAutoBmScript(opts: AutoBmOptions): Promise<void> {
         try {
           logger.info(`Processing task ${taskId}: VIA ${viaUid}, link ${task.link}`);
 
-          // Prepare VIA session với window index dựa trên task index
-          // Window index bắt đầu từ 1 (0 là BM), sau đó tăng dần cho mỗi VIA
-          const viaWindowIndex = 1 + task.index;
-          logger.info(`Preparing VIA session for profile ${task.via.id}`);
-          viaRunner = await prepareViaSession(task.via as any, viaWindowIndex, headless);
+          const viaId = task.via.id;
+          const existingRunner = viaRunnerMap.get(viaId) || null;
+
+          if (existingRunner && isRunnerPageActive(existingRunner)) {
+            viaRunner = existingRunner;
+            logger.info(`Reusing VIA session for profile ${viaId}`);
+          } else {
+            if (existingRunner) {
+              logger.warn(`Existing VIA session for ${viaId} is not usable, recreating...`);
+              try {
+                await existingRunner['browser']?.close();
+              } catch (e) {
+                // ignore cleanup errors
+              }
+              viaRunnerMap.delete(viaId);
+            }
+
+            const viaWindowIndex =
+              viaWindowIndexMap.get(viaId) ??
+              (1 + Math.max(0, vias.findIndex((v) => v.id === viaId)));
+
+            logger.info(`Preparing VIA session for profile ${viaId}`);
+            viaRunner = await prepareViaSession(task.via as any, viaWindowIndex, headless);
+            viaRunnerMap.set(viaId, viaRunner);
+          }
+
+          if (!viaRunner) {
+            throw new Error(`Unable to initialize VIA session for ${viaId}`);
+          }
 
           // VIA xử lý invite và lấy IDs
           logger.info(`VIA ${task.via.id}: Handling invite and extracting IDs`);
@@ -822,13 +1550,6 @@ export async function runAutoBmScript(opts: AutoBmOptions): Promise<void> {
           onProgress?.(doneCount, totalLinks);
 
           logger.info(`Task ${taskId} completed successfully`);
-
-          // Cleanup: close browser
-          try {
-            await viaRunner['browser']?.close();
-          } catch (e) {
-            // Ignore cleanup errors
-          }
         } catch (error: any) {
           result.status = 'error';
           result.errorMessage = error.message || 'Unknown error';
@@ -839,13 +1560,15 @@ export async function runAutoBmScript(opts: AutoBmOptions): Promise<void> {
 
           logger.error(`Task ${taskId} failed:`, error);
 
-          // Cleanup on error
-          try {
-            if (viaRunner) {
-              await viaRunner['browser']?.close();
+          if (viaRunner && !isRunnerPageActive(viaRunner)) {
+            viaRunnerMap.delete(task.via.id);
+          } else if (viaRunner) {
+            try {
+              await viaRunner['page']?.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 10000 });
+            } catch (resetError) {
+              logger.warn(`Failed to reset VIA session for ${task.via.id}: ${resetError}`);
+              viaRunnerMap.delete(task.via.id);
             }
-          } catch (e) {
-            // Ignore cleanup errors
           }
         }
       }
@@ -853,6 +1576,15 @@ export async function runAutoBmScript(opts: AutoBmOptions): Promise<void> {
       roundIndex++;
     }
   }
+
+  for (const runner of viaRunnerMap.values()) {
+    try {
+      await runner['browser']?.close();
+    } catch (e) {
+      // Ignore cleanup errors
+    }
+  }
+  viaRunnerMap.clear();
 
   // Cleanup BM browser
   try {

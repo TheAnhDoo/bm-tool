@@ -1,48 +1,6 @@
 import { logger } from '../utils/logger';
 import { PrismaClient } from '@prisma/client';
 
-async function ensureProfileColumns(prisma: PrismaClient): Promise<void> {
-  try {
-    const columns = await prisma.$queryRaw<Array<{ name: string }>>`
-      PRAGMA table_info(Profile)
-    `;
-
-    if (!columns || columns.length === 0) {
-      // Table doesn't exist yet, nothing to migrate
-      return;
-    }
-
-    const columnNames = columns.map((col) => col.name);
-    const hasUid = columnNames.includes('uid');
-    let hasUsername = columnNames.includes('username');
-
-    if (!hasUsername) {
-      logger.info('Adding username column to Profile table...');
-      await prisma.$executeRawUnsafe(`ALTER TABLE "Profile" ADD COLUMN "username" TEXT`);
-      hasUsername = true;
-    }
-
-    if (hasUid && hasUsername) {
-      logger.info('Migrating uid values into username column...');
-      await prisma.$executeRawUnsafe(
-        `UPDATE "Profile" SET "username" = "uid" WHERE "username" IS NULL AND "uid" IS NOT NULL`
-      );
-    }
-
-    if (!columnNames.includes('cookie')) {
-      logger.info('Adding cookie column to Profile table...');
-      await prisma.$executeRawUnsafe(`ALTER TABLE "Profile" ADD COLUMN "cookie" TEXT`);
-    }
-
-    if (!columnNames.includes('bmUid')) {
-      logger.info('Adding bmUid column to Profile table...');
-      await prisma.$executeRawUnsafe(`ALTER TABLE "Profile" ADD COLUMN "bmUid" TEXT`);
-    }
-  } catch (error) {
-    logger.warn('Failed to ensure Profile columns exist:', error);
-  }
-}
-
 /**
  * Initialize database schema by creating tables if they don't exist
  * Uses SQL directly to avoid needing Prisma CLI in packaged apps
@@ -65,8 +23,56 @@ export async function initializeSchema(databaseUrl?: string): Promise<void> {
     await tempPrisma.$connect();
     const prisma = tempPrisma;
     
-    // Always attempt to create tables (statements are idempotent)
-    logger.info('Ensuring database tables exist...');
+    // Check if tables exist
+    const tables = await prisma.$queryRaw<Array<{ name: string }>>`
+      SELECT name FROM sqlite_master 
+      WHERE type='table' AND name IN ('Profile', 'Invite', 'Log')
+    `;
+
+    if (tables.length === 3) {
+      logger.info('Database tables already exist');
+      
+      // Check and migrate columns in Profile table
+      const columns = await prisma.$queryRaw<Array<{ name: string }>>`
+        PRAGMA table_info(Profile)
+      `;
+      
+      const columnNames = columns.map(col => col.name);
+      
+      // Migrate uid to username if needed
+      if (columnNames.includes('uid') && !columnNames.includes('username')) {
+        logger.info('Migrating uid column to username...');
+        await prisma.$executeRawUnsafe(`
+          ALTER TABLE "Profile" ADD COLUMN "username" TEXT;
+          UPDATE "Profile" SET "username" = "uid" WHERE "uid" IS NOT NULL;
+        `);
+        logger.info('Migrated uid to username successfully');
+      }
+      
+      // Add cookie column if missing
+      if (!columnNames.includes('cookie')) {
+        logger.info('Adding cookie column to Profile table...');
+        await prisma.$executeRawUnsafe(`
+          ALTER TABLE "Profile" ADD COLUMN "cookie" TEXT;
+        `);
+        logger.info('Cookie column added successfully');
+      }
+      
+      // Add bmUid column if missing
+      if (!columnNames.includes('bmUid')) {
+        logger.info('Adding bmUid column to Profile table...');
+        await prisma.$executeRawUnsafe(`
+          ALTER TABLE "Profile" ADD COLUMN "bmUid" TEXT;
+        `);
+        logger.info('bmUid column added successfully');
+      }
+      
+      return;
+    }
+
+    logger.info('Creating database tables...');
+    
+    // Create tables using SQL
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS "Profile" (
         "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -125,10 +131,7 @@ export async function initializeSchema(databaseUrl?: string): Promise<void> {
       CREATE INDEX IF NOT EXISTS "Log_status_idx" ON "Log"("status");
     `);
 
-    logger.info('Database tables ensured successfully');
-
-    // Ensure Profile table has all expected columns (handles migrations)
-    await ensureProfileColumns(prisma);
+    logger.info('Database tables created successfully');
   } catch (error: any) {
     logger.error('Failed to initialize database schema:', error);
     // Don't throw - app might still work if tables exist

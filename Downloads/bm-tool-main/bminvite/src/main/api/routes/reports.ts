@@ -55,8 +55,10 @@ export async function registerReportRoutes(fastify: FastifyInstance) {
           i.*,
           vp.id as via_profile_id,
           vp.username as via_username,
+          vp.uid as via_uid,
           bp.id as bm_profile_id,
           bp.username as bm_username,
+          bp.uid as bm_uid,
           bp.bmUid as bm_bmUid
         FROM "Invite" i
         LEFT JOIN "Profile" vp ON i."viaId" = vp.id
@@ -68,7 +70,7 @@ export async function registerReportRoutes(fastify: FastifyInstance) {
       const reports = invitesRaw.map((row: any) => ({
         id: row.id,
         idVia: row.via_profile_id ? `via_${row.via_profile_id}` : null,
-        username: row.via_username || null,
+        username: row.via_username || row.via_uid || null,
         idAdAccount: row.adAccountId || null,
         idBM: row.bm_profile_id ? `bm_${row.bm_profile_id}` : null,
         bmUid: row.bm_bmUid || null,
@@ -94,8 +96,10 @@ export async function registerReportRoutes(fastify: FastifyInstance) {
           i.*,
           vp.id as via_profile_id,
           vp.username as via_username,
+          vp.uid as via_uid,
           bp.id as bm_profile_id,
           bp.username as bm_username,
+          bp.uid as bm_uid,
           bp.bmUid as bm_bmUid
         FROM "Invite" i
         LEFT JOIN "Profile" vp ON i."viaId" = vp.id
@@ -108,7 +112,7 @@ export async function registerReportRoutes(fastify: FastifyInstance) {
           'ID Via,Username,ID Ad Account,ID BM,BM UID,Status,Time',
           ...invitesRaw.map((row: any) => {
             const idVia = row.via_profile_id ? `via_${row.via_profile_id}` : '';
-            const username = row.via_username || '';
+            const username = row.via_username || row.via_uid || '';
             const idAdAccount = row.adAccountId || '';
             const idBM = row.bm_profile_id ? `bm_${row.bm_profile_id}` : '';
             const bmUid = row.bm_bmUid || '';
@@ -138,11 +142,11 @@ export async function registerReportRoutes(fastify: FastifyInstance) {
         completedAt: row.completedAt,
         viaProfile: row.via_profile_id ? {
           id: row.via_profile_id,
-          username: row.via_username || null,
+          username: row.via_username || row.via_uid || null,
         } : null,
         bmProfile: row.bm_profile_id ? {
           id: row.bm_profile_id,
-          username: row.bm_username || null,
+          username: row.bm_username || row.bm_uid || null,
           bmUid: row.bm_bmUid || null,
         } : null,
       }));

@@ -1,20 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { PrismaClient } from '@prisma/client';
 import { getPrismaClient } from '../../db/prismaClient';
 import { logger } from '../../utils/logger';
-
-async function tableExists(prisma: PrismaClient, tableName: string): Promise<boolean> {
-  try {
-    const result = await prisma.$queryRawUnsafe<Array<{ count: number }>>(
-      `SELECT COUNT(*) as count FROM sqlite_master WHERE type='table' AND name=?`,
-      tableName
-    );
-    return (result[0]?.count || 0) > 0;
-  } catch (error) {
-    logger.warn(`Failed to check if table ${tableName} exists:`, error);
-    return false;
-  }
-}
 
 export async function registerDashboardRoutes(fastify: FastifyInstance) {
   const prisma = getPrismaClient();
@@ -32,12 +18,11 @@ export async function registerDashboardRoutes(fastify: FastifyInstance) {
 
       // Check if Invite table exists before querying
       let totalInvites = 0;
-      if (await tableExists(prisma, 'Invite')) {
-        const inviteCountRaw = await prisma.$queryRawUnsafe<Array<{ count: number }>>(
-          `SELECT COUNT(*) as count FROM "Invite"`
-        );
+      try {
+        const inviteCountRaw = await prisma.$queryRawUnsafe<Array<{ count: number }>>(`SELECT COUNT(*) as count FROM "Invite"`);
         totalInvites = inviteCountRaw[0]?.count || 0;
-      } else {
+      } catch (e) {
+        // Table doesn't exist, use 0
         logger.debug('Invite table does not exist yet');
       }
 
@@ -66,22 +51,15 @@ export async function registerDashboardRoutes(fastify: FastifyInstance) {
         take: 10,
         orderBy: { createdAt: 'desc' },
         include: {
-          profile: { select: { id: true, type: true, username: true } },
+          profile: { select: { id: true, type: true, uid: true } },
         },
       });
 
-      const activities = recentLogs.map((log) => {
-        const profileIdentifier =
-          log.profile?.username || (log.profile?.id != null ? log.profile.id.toString() : null);
-
-        return {
-          action: log.message,
-          time: log.createdAt.toISOString(),
-          profile: log.profile && profileIdentifier
-            ? `${log.profile.type}_${profileIdentifier}`
-            : null,
-        };
-      });
+      const activities = recentLogs.map((log) => ({
+        action: log.message,
+        time: log.createdAt.toISOString(),
+        profile: log.profile ? `${log.profile.type}_${log.profile.id}` : null,
+      }));
 
       return { activities };
     } catch (error: any) {

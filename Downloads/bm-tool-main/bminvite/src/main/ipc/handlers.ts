@@ -467,7 +467,7 @@ export function setupIPCHandlers(mainWindow: BrowserWindow | null) {
   let autoBmScriptCancelled = false;
   let autoBmScriptRunning = false;
 
-  ipcMain.handle('autoBm:run', async (_event, data: { bmId: number; viaIds: number[]; inviteIds: number[]; headless?: boolean }) => {
+  ipcMain.handle('autoBm:run', async (_event, data: { bmId: number; viaIds: number[]; inviteLinks: string[]; headless?: boolean }) => {
     if (autoBmScriptRunning) {
       return { success: false, error: 'Script is already running' };
     }
@@ -524,35 +524,13 @@ export function setupIPCHandlers(mainWindow: BrowserWindow | null) {
         username: via.username || via.uid || null,
       }));
 
-      if (!data.inviteIds || data.inviteIds.length === 0) {
-        throw new Error('No invite links selected');
-      }
-
-      const invitePlaceholders = data.inviteIds.map(() => '?').join(',');
-      const invitesRaw = await prisma.$queryRawUnsafe<Array<{ id: number; link: string }>>(
-        `SELECT id, link FROM "Invite" WHERE id IN (${invitePlaceholders}) ORDER BY "createdAt" ASC`,
-        ...data.inviteIds
-      );
-
-      if (!invitesRaw || invitesRaw.length === 0) {
-        throw new Error('Không tìm thấy link invite trong cơ sở dữ liệu');
-      }
-
-      const inviteLinks = invitesRaw
-        .map((invite) => (invite.link || '').trim())
-        .filter((link) => link.length > 0);
-
-      if (inviteLinks.length === 0) {
-        throw new Error('Các invite đã chọn không có link hợp lệ');
-      }
-
       // Import and run script
       const { runAutoBmScript } = await import('../modules/autoBmScript');
       
       await runAutoBmScript({
         bm: bmWithUsername as any,
         vias: viasWithUsername as any,
-        inviteLinks,
+        inviteLinks: data.inviteLinks,
         headless: data.headless || false,
         onLog: (log) => {
           sendEvent(mainWindow, 'autoBm:log', log);
@@ -578,6 +556,62 @@ export function setupIPCHandlers(mainWindow: BrowserWindow | null) {
     autoBmScriptCancelled = true;
     autoBmScriptRunning = false;
     return { success: true };
+  });
+
+  ipcMain.handle('autoBm:test', async (_event, data: { bmId: number; viaId: number; headless?: boolean }) => {
+    try {
+      // Get profiles from database
+      const prisma = getPrismaClient();
+      
+      // Get BM profile
+      const bmRaw = await prisma.$queryRawUnsafe<Array<any>>(
+        `SELECT * FROM "Profile" WHERE id = ? AND type = 'BM' LIMIT 1`,
+        data.bmId
+      );
+      
+      if (!bmRaw || bmRaw.length === 0) {
+        throw new Error('BM profile not found');
+      }
+      
+      const bm = bmRaw[0];
+
+      // Get VIA profile
+      const viaRaw = await prisma.$queryRawUnsafe<Array<any>>(
+        `SELECT * FROM "Profile" WHERE id = ? AND type = 'VIA' LIMIT 1`,
+        data.viaId
+      );
+
+      if (!viaRaw || viaRaw.length === 0) {
+        throw new Error('VIA profile not found');
+      }
+      
+      const via = viaRaw[0];
+
+      // Map uid to username for backward compatibility
+      const bmWithUsername = {
+        ...bm,
+        username: bm.username || bm.uid || null,
+      };
+      
+      const viaWithUsername = {
+        ...via,
+        username: via.username || via.uid || null,
+      };
+
+      // Import and run test function
+      const { testAutoBmProfiles } = await import('../modules/autoBmScript');
+      
+      await testAutoBmProfiles(
+        viaWithUsername as any,
+        bmWithUsername as any,
+        data.headless || false
+      );
+
+      return { success: true };
+    } catch (error: any) {
+      logger.error('autoBm:test failed:', error);
+      return { success: false, error: error.message || error.toString() };
+    }
   });
 
   // ============================================

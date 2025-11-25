@@ -155,12 +155,16 @@ class APIService {
   // AUTO BM SCRIPT
   // ============================================
 
-  async runAutoBmScript(data: { bmId: number; viaIds: number[]; inviteIds: number[]; headless?: boolean }) {
+  async runAutoBmScript(data: { bmId: number; viaIds: number[]; inviteLinks: string[]; headless?: boolean }) {
     return this.callIPC('autoBm:run', data);
   }
 
   async stopAutoBmScript() {
     return this.callIPC('autoBm:stop');
+  }
+
+  async testAutoBmProfiles(data: { bmId: number; viaId: number; headless?: boolean }) {
+    return this.callIPC('autoBm:test', data);
   }
 
   // ============================================

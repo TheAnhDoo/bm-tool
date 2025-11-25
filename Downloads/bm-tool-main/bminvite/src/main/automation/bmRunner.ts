@@ -21,12 +21,12 @@ export class BMRunner {
     this.profile = profile;
   }
 
-  async initialize(windowConfig?: { width: number; height: number; x: number; y: number }): Promise<void> {
+  async initialize(windowConfig?: { width: number; height: number; x: number; y: number }, headlessOverride?: boolean): Promise<void> {
     const deviceConfig = JSON.parse(this.profile.deviceConfig);
     const proxy = parseProxy(this.profile.proxy);
 
-    // Check if headless mode is enabled
-    const isHeadless = (deviceConfig as any).headless === true;
+    // Check if headless mode is enabled - use override if provided, otherwise use deviceConfig
+    const isHeadless = headlessOverride !== undefined ? headlessOverride : ((deviceConfig as any).headless === true);
 
     // Default window size (smaller for multiple windows)
     const defaultWidth = 800;
@@ -365,8 +365,7 @@ export class BMRunner {
     }
 
     // Use username (new) or uid (old) for backward compatibility
-    const legacyUid = (this.profile as any).uid;
-    const uid = this.profile.username || legacyUid;
+    const uid = (this.profile as any).username || this.profile.uid;
     const password = this.profile.password || null;
     const cookie = (this.profile as any).cookie || null;
 

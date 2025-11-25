@@ -368,10 +368,3 @@ UI tab `"Auto BM Script"`:
      * VIA: 2.3 (approve).
 5. Sử dụng các **selector cụ thể đã cung cấp** để click/type/wait trong từng step (ưu tiên selector dạng `#id`, dùng CSS/Xpath dài làm fallback).
 
-```
-
----
-
-Nếu sau khi cho Cursor chạy xong, bạn có file `autoBmScript.ts` và component `AutoBmPage`, bạn có thể gửi lại mình, mình giúp bạn soi tiếp luồng / tối ưu thêm.
-::contentReference[oaicite:0]{index=0}
-```

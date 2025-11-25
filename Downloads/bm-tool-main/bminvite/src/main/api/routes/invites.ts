@@ -35,8 +35,10 @@ export async function registerInviteRoutes(fastify: FastifyInstance) {
           i.*,
           vp.id as via_profile_id,
           vp.username as via_username,
+          vp.uid as via_uid,
           bp.id as bm_profile_id,
           bp.username as bm_username,
+          bp.uid as bm_uid,
           bp.bmUid as bm_bmUid
         FROM "Invite" i
         LEFT JOIN "Profile" vp ON i."viaId" = vp.id
@@ -61,11 +63,11 @@ export async function registerInviteRoutes(fastify: FastifyInstance) {
         completedAt: row.completedAt,
         viaProfile: row.via_profile_id ? {
           id: row.via_profile_id,
-          username: row.via_username || null,
+          username: row.via_username || row.via_uid || null,
         } : null,
         bmProfile: row.bm_profile_id ? {
           id: row.bm_profile_id,
-          username: row.bm_username || null,
+          username: row.bm_username || row.bm_uid || null,
           bmUid: row.bm_bmUid || null,
         } : null,
       }));

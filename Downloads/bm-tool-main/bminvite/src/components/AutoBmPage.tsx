@@ -1,9 +1,10 @@
 import { useState, useEffect } from "react";
-import { Play, Square, X, Search, RefreshCw } from "lucide-react";
+import { Play, Square, X, Search, TestTube } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table";
 import { Checkbox } from "./ui/checkbox";
+import { Textarea } from "./ui/textarea";
 import { api } from "../renderer/services/api";
 import { TaskResult, BM_RATE_LIMIT_PER_ROUND } from "../modules/autoBmScript";
 
@@ -18,23 +19,12 @@ interface Profile {
   cookie?: string | null;
 }
 
-interface InviteLink {
-  id: number;
-  link: string;
-  status: string;
-  notes?: string | null;
-  createdAt: string;
-}
-
 export function AutoBmPage() {
   const [bmProfiles, setBmProfiles] = useState<Profile[]>([]);
   const [viaProfiles, setViaProfiles] = useState<Profile[]>([]);
   const [selectedBmId, setSelectedBmId] = useState<number | null>(null);
   const [selectedViaIds, setSelectedViaIds] = useState<number[]>([]);
-  const [invites, setInvites] = useState<InviteLink[]>([]);
-  const [selectedInviteIds, setSelectedInviteIds] = useState<number[]>([]);
-  const [inviteSearchQuery, setInviteSearchQuery] = useState("");
-  const [isLoadingInvites, setIsLoadingInvites] = useState(false);
+  const [inviteLinks, setInviteLinks] = useState("");
   const [isRunning, setIsRunning] = useState(false);
   const [isCancelled, setIsCancelled] = useState(false);
   const [logs, setLogs] = useState<TaskResult[]>([]);
@@ -46,34 +36,6 @@ export function AutoBmPage() {
 
   useEffect(() => {
     loadProfiles();
-  }, []);
-
-  useEffect(() => {
-    loadInvites();
-
-    const handleInviteCreated = () => loadInvites();
-    window.addEventListener('invite:created', handleInviteCreated);
-
-    let unsubscribe: (() => void) | undefined;
-    if (window.electronAPI) {
-      unsubscribe = window.electronAPI.subscribeAutomation((event) => {
-        if (
-          event === 'invites:created' ||
-          event === 'invites:uploaded' ||
-          event === 'invites:deleted' ||
-          event === 'invite:deleted'
-        ) {
-          loadInvites();
-        }
-      });
-    }
-
-    return () => {
-      window.removeEventListener('invite:created', handleInviteCreated);
-      if (unsubscribe) {
-        unsubscribe();
-      }
-    };
   }, []);
 
   const loadProfiles = async () => {
@@ -118,34 +80,6 @@ export function AutoBmPage() {
     }
   };
 
-  const loadInvites = async () => {
-    setIsLoadingInvites(true);
-    try {
-      const result = await api.listInvites();
-      if (result.success && result.data?.invites) {
-        const mappedInvites: InviteLink[] = result.data.invites.map((invite: any) => ({
-          id: invite.id,
-          link: invite.link,
-          status: invite.status,
-          notes: invite.notes || null,
-          createdAt: invite.createdAt,
-        }));
-        setInvites(mappedInvites);
-        setSelectedInviteIds((prev) =>
-          prev.filter((id) => mappedInvites.some((invite) => invite.id === id))
-        );
-      } else if (result.error) {
-        console.error('Failed to load invites:', result.error);
-        alert(`Failed to load invites: ${result.error}`);
-      }
-    } catch (error: any) {
-      console.error('Failed to load invites:', error);
-      alert(`Failed to load invites: ${error.message || 'Unknown error'}`);
-    } finally {
-      setIsLoadingInvites(false);
-    }
-  };
-
   const filteredBMs = bmProfiles.filter(
     (bm) =>
       (bm.username || '').toLowerCase().includes(bmSearchQuery.toLowerCase()) ||
@@ -157,12 +91,6 @@ export function AutoBmPage() {
     (via) =>
       (via.username || '').toLowerCase().includes(viaSearchQuery.toLowerCase()) ||
       via.proxy.toLowerCase().includes(viaSearchQuery.toLowerCase())
-  );
-
-  const filteredInvites = invites.filter(
-    (invite) =>
-      invite.link.toLowerCase().includes(inviteSearchQuery.toLowerCase()) ||
-      (invite.notes || '').toLowerCase().includes(inviteSearchQuery.toLowerCase())
   );
 
   const handleToggleVia = (viaId: number) => {
@@ -179,20 +107,6 @@ export function AutoBmPage() {
     }
   };
 
-  const handleToggleInvite = (inviteId: number) => {
-    setSelectedInviteIds((prev) =>
-      prev.includes(inviteId) ? prev.filter((id) => id !== inviteId) : [...prev, inviteId]
-    );
-  };
-
-  const handleSelectAllInvites = () => {
-    if (selectedInviteIds.length === filteredInvites.length) {
-      setSelectedInviteIds([]);
-    } else {
-      setSelectedInviteIds(filteredInvites.map((invite) => invite.id));
-    }
-  };
-
   const handleRun = async () => {
     if (!selectedBmId) {
       alert('Vui lòng chọn BM trung gian');
@@ -204,16 +118,13 @@ export function AutoBmPage() {
       return;
     }
 
-    if (selectedInviteIds.length === 0) {
-      alert('Vui lòng chọn ít nhất một link invite từ danh sách');
-      return;
-    }
+    const links = inviteLinks
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
 
-    const selectedInvites = invites.filter((invite) => selectedInviteIds.includes(invite.id));
-
-    if (selectedInvites.length === 0) {
-      alert('Không tìm thấy link invite đã chọn. Vui lòng tải lại danh sách.');
-      await loadInvites();
+    if (links.length === 0) {
+      alert('Vui lòng nhập ít nhất một link invite');
       return;
     }
 
@@ -233,14 +144,14 @@ export function AutoBmPage() {
     setIsRunning(true);
     setIsCancelled(false);
     setLogs([]);
-    setProgress({ done: 0, total: selectedInvites.length });
+    setProgress({ done: 0, total: links.length });
 
     try {
       // Call via IPC
       const result = await api.runAutoBmScript({
         bmId: selectedBM.id,
         viaIds: selectedVIAs.map(v => v.id),
-        inviteIds: selectedInvites.map((invite) => invite.id),
+        inviteLinks: links,
         headless: headless,
       });
 
@@ -280,6 +191,53 @@ export function AutoBmPage() {
   const handleClearLog = () => {
     setLogs([]);
     setProgress({ done: 0, total: 0 });
+  };
+
+  const handleTest = async () => {
+    if (!selectedBmId) {
+      alert('Vui lòng chọn BM trung gian');
+      return;
+    }
+
+    if (selectedViaIds.length === 0) {
+      alert('Vui lòng chọn ít nhất một VIA');
+      return;
+    }
+
+    if (selectedViaIds.length > 1) {
+      alert('Test Mode chỉ hỗ trợ 1 VIA. Vui lòng chọn chỉ 1 VIA.');
+      return;
+    }
+
+    const selectedBM = bmProfiles.find((p) => p.id === selectedBmId);
+    const selectedVIA = viaProfiles.find((p) => selectedViaIds.includes(p.id));
+
+    if (!selectedBM) {
+      alert('BM trung gian không tồn tại');
+      return;
+    }
+
+    if (!selectedVIA) {
+      alert('VIA không tồn tại');
+      return;
+    }
+
+    try {
+      const result = await api.testAutoBmProfiles({
+        bmId: selectedBM.id,
+        viaId: selectedVIA.id,
+        headless: headless,
+      });
+
+      if (!result.success) {
+        throw new Error(result.error || 'Failed to run test');
+      }
+
+      alert('✅ Test Mode: Đã mở VIA và BM profiles. Browsers sẽ giữ nguyên để bạn test selectors.\n\nVIA: Đã đến bước click avatar\nBM: Đã set cookies và navigate xong');
+    } catch (error: any) {
+      console.error('Test Mode error:', error);
+      alert(`Error: ${error.message || 'Đã xảy ra lỗi khi chạy test mode'}`);
+    }
   };
 
   const formatDate = (timestamp: number) => {
@@ -323,7 +281,7 @@ export function AutoBmPage() {
             className="rounded-xl gap-2"
             style={{ backgroundColor: "#10B981" }}
             onClick={handleRun}
-            disabled={isRunning || !selectedBmId || selectedViaIds.length === 0 || selectedInviteIds.length === 0}
+            disabled={isRunning || !selectedBmId || selectedViaIds.length === 0}
           >
             <Play size={18} />
             Run Script
@@ -346,6 +304,15 @@ export function AutoBmPage() {
           >
             <X size={18} />
             Clear Log
+          </Button>
+          <Button
+            className="rounded-xl gap-2"
+            style={{ backgroundColor: "#8B5CF6" }}
+            onClick={handleTest}
+            disabled={isRunning || !selectedBmId || selectedViaIds.length !== 1}
+          >
+            <TestTube size={18} />
+            Test Mode
           </Button>
           <div className="flex items-center gap-2 ml-4">
             <Checkbox
@@ -468,91 +435,20 @@ export function AutoBmPage() {
           </div>
         </div>
 
-        {/* Invite Selection */}
+        {/* Invite Links Input */}
         <div className="bg-white rounded-xl p-4 mb-6" style={{ border: "1px solid #E5E7EB" }}>
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-lg font-semibold" style={{ color: "#333" }}>
-              Chọn Link Invite ({selectedInviteIds.length} selected)
-            </h3>
-            <Button
-              variant="outline"
-              className="rounded-xl gap-2"
-              onClick={loadInvites}
-              disabled={isLoadingInvites}
-              style={{ borderColor: "#E5E7EB" }}
-            >
-              <RefreshCw size={16} className={isLoadingInvites ? "animate-spin" : ""} />
-              Refresh
-            </Button>
-          </div>
-          <div className="mb-3">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2" size={16} style={{ color: "#9CA3AF" }} />
-              <Input
-                placeholder="Search invite links..."
-                value={inviteSearchQuery}
-                onChange={(e) => setInviteSearchQuery(e.target.value)}
-                className="pl-9 rounded-lg text-sm"
-                style={{ borderColor: "#E5E7EB" }}
-              />
-            </div>
-          </div>
-          <div className="max-h-60 overflow-y-auto">
-            <div className="flex items-center mb-2">
-              <Checkbox
-                checked={selectedInviteIds.length === filteredInvites.length && filteredInvites.length > 0}
-                onCheckedChange={handleSelectAllInvites}
-              />
-              <span className="ml-2 text-sm" style={{ color: "#6B7280" }}>
-                Select All
-              </span>
-            </div>
-            {isLoadingInvites ? (
-              <div className="text-sm text-center py-4" style={{ color: "#9CA3AF" }}>
-                Đang tải link invite...
-              </div>
-            ) : filteredInvites.length === 0 ? (
-              <div className="text-sm text-center py-4" style={{ color: "#9CA3AF" }}>
-                Không có link invite phù hợp
-              </div>
-            ) : (
-              filteredInvites.map((invite) => (
-                <div key={invite.id} className="flex items-start justify-between p-2 rounded-lg hover:bg-gray-50 mb-1">
-                  <div className="flex items-start gap-2">
-                    <Checkbox
-                      checked={selectedInviteIds.includes(invite.id)}
-                      onCheckedChange={() => handleToggleInvite(invite.id)}
-                    />
-                    <div>
-                      <div className="text-sm font-medium" style={{ color: "#333" }}>
-                        #{invite.id}
-                      </div>
-                      <div className="text-xs break-all" style={{ color: "#374151" }}>
-                        {invite.link}
-                      </div>
-                      <div className="text-xs" style={{ color: "#6B7280" }}>
-                        {(invite.notes && invite.notes.trim() !== '' ? invite.notes : 'Không có ghi chú') +
-                          ' • ' +
-                          new Date(invite.createdAt).toLocaleString('vi-VN')}
-                      </div>
-                    </div>
-                  </div>
-                  <span
-                    className={`text-xs px-2 py-1 rounded ${
-                      invite.status === 'success'
-                        ? 'bg-green-100 text-green-700'
-                        : invite.status === 'failed'
-                        ? 'bg-red-100 text-red-700'
-                        : 'bg-gray-100 text-gray-700'
-                    }`}
-                  >
-                    {invite.status}
-                  </span>
-                </div>
-              ))
-            )}
-          </div>
-          <div className="mt-3 text-xs" style={{ color: "#6B7280" }}>
+          <h3 className="text-lg font-semibold mb-3" style={{ color: "#333" }}>
+            Danh sách Link Invite (mỗi dòng một link)
+          </h3>
+          <Textarea
+            value={inviteLinks}
+            onChange={(e) => setInviteLinks(e.target.value)}
+            placeholder="Paste invite links here, one per line..."
+            className="rounded-lg font-mono text-sm"
+            rows={6}
+            style={{ borderColor: "#E5E7EB" }}
+          />
+          <div className="mt-2 text-xs" style={{ color: "#6B7280" }}>
             Rate limit: Tối đa {BM_RATE_LIMIT_PER_ROUND} VIA per round
           </div>
         </div>
