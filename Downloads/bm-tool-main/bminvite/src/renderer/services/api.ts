@@ -163,7 +163,7 @@ class APIService {
     return this.callIPC('autoBm:stop');
   }
 
-  async testAutoBmProfiles(data: { bmId: number; viaId: number; headless?: boolean }) {
+  async testAutoBmProfiles(data: { viaId: number; viaBmId: string; headless?: boolean }) {
     return this.callIPC('autoBm:test', data);
   }
 

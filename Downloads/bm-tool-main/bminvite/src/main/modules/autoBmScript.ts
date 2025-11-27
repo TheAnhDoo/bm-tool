@@ -77,13 +77,25 @@ export interface AutoBmOptions {
   isCancelled?: () => boolean;
 }
 
+type ViaTask = { via: Profile; link: string; index: number };
+
+interface RoundTaskContext {
+  task: ViaTask;
+  taskId: string;
+  viaRunner: ViaRunner | null;
+  viaBmId?: string;
+  viaAdAccountUid?: string;
+  extractionError?: Error;
+  result: TaskResult;
+}
+
 /**
  * Calculate window position for browser windows (same as ProfileManager)
  */
 function calculateWindowPosition(index: number): { width: number; height: number; x: number; y: number } {
-  // Smaller window size
-  const windowWidth = 800;
-  const windowHeight = 600;
+  const isBmWindow = index === 0;
+  const windowWidth = isBmWindow ? 1280 : 800;
+  const windowHeight = isBmWindow ? 900 : 600;
   
   // Grid arrangement: 2 columns
   const colsPerRow = 2;
@@ -350,6 +362,226 @@ async function selectAndCopyByXPath(page: any, xpath: string): Promise<string> {
   }, xpath);
 }
 
+/**
+ * Helper: Get trimmed text/label from first selector match
+ */
+async function getTextFromSelector(page: any, selector: string): Promise<string> {
+  try {
+    const elements = selector.startsWith('//') ? await findByXPath(page, selector) : await findByCss(page, selector);
+    const element = elements[0];
+    if (!element) {
+      return '';
+    }
+
+    const text =
+      (await page.evaluate((el: Element) => {
+        const textContent = el.textContent?.trim();
+        if (textContent) {
+          return textContent;
+        }
+        const ariaLabel = el.getAttribute('aria-label');
+        if (ariaLabel?.trim()) {
+          return ariaLabel.trim();
+        }
+        return el.getAttribute('data-auto-logging-id')?.trim() || '';
+      }, element)) || '';
+
+    await element.dispose?.();
+    return text.trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Helper: Extract text/label via absolute XPaths (mimic extension capture)
+ */
+async function getTextByFullXPaths(page: any, xpaths: string[]): Promise<string> {
+  for (const xpath of xpaths) {
+    try {
+      const text = await page.evaluate((xpathStr: string) => {
+        const result = document.evaluate(
+          xpathStr,
+          document,
+          null,
+          XPathResult.FIRST_ORDERED_NODE_TYPE,
+          null
+        );
+        const node = result.singleNodeValue as Element | null;
+        if (!node) {
+          return '';
+        }
+        const textContent = node.textContent?.trim();
+        if (textContent) {
+          return textContent;
+        }
+        const ariaLabel = node.getAttribute('aria-label');
+        if (ariaLabel?.trim()) {
+          return ariaLabel.trim();
+        }
+        return node.getAttribute('data-auto-logging-id')?.trim() || '';
+      }, xpath);
+
+      if (text) {
+        return text;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return '';
+}
+
+async function ensureBmSpanCleaner(page: any): Promise<void> {
+  if (!page || typeof page.evaluateOnNewDocument !== 'function') {
+    return;
+  }
+  try {
+    await page.evaluateOnNewDocument(() => {
+      const win = window as any;
+
+      const removeSpan = () => {
+        try {
+          const span = document.querySelector('body > span');
+          if (span) {
+            span.remove();
+          }
+        } catch (e) {
+          // ignore
+        }
+      };
+
+      if (!win.__bmSpanCleanerInterval) {
+        removeSpan();
+        win.__bmSpanCleanerInterval = window.setInterval(removeSpan, 5000);
+        window.addEventListener('unload', () => {
+          if (win.__bmSpanCleanerInterval) {
+            clearInterval(win.__bmSpanCleanerInterval);
+            win.__bmSpanCleanerInterval = null;
+          }
+        });
+      }
+    });
+
+    await page.evaluate(() => {
+      const span = document.querySelector('body > span');
+      if (span) {
+        span.remove();
+      }
+    });
+  } catch (e) {
+    logger.warn(`Failed to inject BM span cleaner: ${(e as Error).message}`);
+  }
+}
+
+async function ensureBodySpanRemoved(page: any): Promise<void> {
+  if (!page || typeof page.evaluateOnNewDocument !== 'function') {
+    return;
+  }
+  try {
+    const injectRemovalScript = `
+      (() => {
+        const win = window as any;
+        const hasVerificationPopup = () => {
+          try {
+            const span = document.querySelector('body > span');
+            if (!span) {
+              return false;
+            }
+            const text = (span.textContent || '').toLowerCase();
+            if (text.includes('verification needed') || text.includes('verify your account')) {
+              return true;
+            }
+            const verifyButton = Array.from(
+              span.querySelectorAll('button, div[role="button"], span[role="button"]')
+            ).find(btn => (btn.textContent || '').toLowerCase().includes('verify'));
+            return Boolean(verifyButton);
+          } catch {
+            return false;
+          }
+        };
+        const removeSpan = () => {
+          try {
+            if (hasVerificationPopup()) {
+              const span = document.querySelector('body > span');
+              span?.remove();
+            }
+          } catch {
+            // ignore
+          }
+        };
+        if (!win.__bmBodySpanObserverInitialized) {
+          win.__bmBodySpanObserverInitialized = true;
+          document.addEventListener('DOMContentLoaded', () => {
+            removeSpan();
+          });
+          removeSpan();
+          const observer = new MutationObserver(() => {
+            if (hasVerificationPopup()) {
+              removeSpan();
+            }
+          });
+          observer.observe(document.documentElement || document.body, {
+            childList: true,
+            subtree: true,
+          });
+          win.__bmBodySpanRemovalInterval = window.setInterval(() => {
+            if (hasVerificationPopup()) {
+              removeSpan();
+            }
+          }, 1000);
+          win.__bmBodySpanObserver = observer;
+          window.addEventListener('unload', () => {
+            try {
+              observer.disconnect();
+            } catch {
+              // ignore
+            }
+            if (win.__bmBodySpanRemovalInterval) {
+              clearInterval(win.__bmBodySpanRemovalInterval);
+              win.__bmBodySpanRemovalInterval = null;
+            }
+            win.__bmBodySpanObserverInitialized = false;
+          });
+        } else {
+          removeSpan();
+        }
+      })();
+    `;
+
+    await page.evaluateOnNewDocument(injectRemovalScript);
+    await page.evaluate(injectRemovalScript);
+  } catch (e) {
+    logger.warn(`Failed to inject/remove body span overlay: ${(e as Error).message}`);
+  }
+}
+
+async function removeVerificationPopupIfPresent(page: any): Promise<void> {
+  if (!page) {
+    return;
+  }
+  try {
+    await page.evaluate(() => {
+      const span = document.querySelector('body > span');
+      if (!span) {
+        return;
+      }
+      const text = (span.textContent || '').toLowerCase();
+      const hasVerifyText =
+        text.includes('verification needed') || text.includes('verify your account');
+      const hasVerifyButton = Array.from(
+        span.querySelectorAll('button, div[role="button"], span[role="button"]')
+      ).some(btn => (btn.textContent || '').toLowerCase().includes('verify'));
+      if (hasVerifyText || hasVerifyButton) {
+        span.remove();
+      }
+    });
+  } catch {
+    // ignore
+  }
+}
+
 function isRunnerPageActive(runner: { [key: string]: any } | null | undefined): boolean {
   if (!runner) {
     return false;
@@ -368,25 +600,37 @@ function isRunnerPageActive(runner: { [key: string]: any } | null | undefined): 
   return true;
 }
 
-async function elementExists(page: any, selectors: string[]): Promise<boolean> {
-  for (const selector of selectors) {
-    try {
-      if (selector.startsWith('//')) {
-        const elements = await page.$x(selector);
-        if (elements && elements.length > 0) {
-          return true;
-        }
-      } else {
-        const element = await page.$(selector);
-        if (element) {
-          return true;
-        }
-      }
-    } catch (e) {
-      continue;
-    }
+async function ensureViaRunner(
+  via: Profile,
+  viaRunnerMap: Map<number, ViaRunner>,
+  viaWindowIndexMap: Map<number, number>,
+  vias: Profile[],
+  headless: boolean
+): Promise<ViaRunner> {
+  const viaId = via.id;
+  const existingRunner = viaRunnerMap.get(viaId) || null;
+
+  if (existingRunner && isRunnerPageActive(existingRunner)) {
+    return existingRunner;
   }
-  return false;
+
+  if (existingRunner) {
+    try {
+      await existingRunner['browser']?.close();
+    } catch {
+      // ignore cleanup errors
+    }
+    viaRunnerMap.delete(viaId);
+  }
+
+  const windowIndex =
+    viaWindowIndexMap.get(viaId) ??
+    (1 + Math.max(0, vias.findIndex((v) => v.id === viaId)));
+
+  logger.info(`Preparing VIA session for profile ${viaId}`);
+  const newRunner = await prepareViaSession(via as any, windowIndex, headless);
+  viaRunnerMap.set(viaId, newRunner);
+  return newRunner;
 }
 
 /**
@@ -549,15 +793,40 @@ export async function prepareViaSession(
   await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
   await new Promise(resolve => setTimeout(resolve, 2000));
 //   //*[@id="mount_0_0_Bg"]/div/div[1]/div/div[3]/div/div/div[1]/div[1]/div/div[2]/div/div/div/div[2]/div/div[2]/div  khi refresh trang, nếu như facebook có element này thì đã login thành công, skip đến bước dán link invite
-// const isLoggedIn = await page.evaluate(() => {
-//   // @ts-ignore
-//   .xpath('//*[@id="mount_0_0_Bg"]/div/div[1]/div/div[3]/div/div/div[1]/div[1]/div/div[2]/div/div/div/div[2]/div/div[2]/div')
-//   .build();
-// });
-// if (isLoggedIn) {
-//   logger.info(`VIA Profile ${profile.id}: Successfully logged in using cookies`);
-//   return runner;
-// }
+  const viaLoggedInAlready = await page.evaluate(() => {
+    const selectors = [
+      '[data-testid="blue_bar_profile_link"]',
+      '[aria-label*="Account"]'
+    ];
+
+    const hasCookie = document.cookie.includes('c_user=');
+    const hasSelectorMatch = selectors.some(sel => !!document.querySelector(sel));
+
+    const xpath =
+      '//*[@id="mount_0_0_Bg"]/div/div[1]/div/div[3]/div/div/div[1]/div[1]/div/div[2]/div/div/div/div[2]/div/div[2]/div';
+    const hasXPathElement = (() => {
+      try {
+        const result = document.evaluate(
+          xpath,
+          document,
+          null,
+          XPathResult.FIRST_ORDERED_NODE_TYPE,
+          null
+        );
+        return !!result.singleNodeValue;
+      } catch {
+        return false;
+      }
+    })();
+
+    return hasCookie || hasSelectorMatch || hasXPathElement;
+  });
+
+  if (viaLoggedInAlready) {
+    logger.info(`VIA Profile ${profile.id}: Session already logged in after cookie refresh, skipping password login`);
+    return runner;
+  }
+
   // Bước 2: Click avatar để hiện form login
   // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
   const avatarSelectors = selectors()
@@ -641,6 +910,7 @@ export async function prepareBmSession(
   }
 
   const page = runner['page'];
+  await ensureBmSpanCleaner(page);
 
   // Sử dụng cùng flow như ProfileManager.openBrowserProfile()
   // Determine base URL and final target URL (giống ProfileManager)
@@ -724,230 +994,29 @@ export async function prepareBmSession(
 }
 
 /**
- * Test Mode: Mở VIA và BM profiles đến các bước được chỉ định để test selectors
- * - VIA: Chạy đến bước click avatar (sau khi set cookies và reload)
- * - BM: Chạy đến bước set cookies và navigate xong
- * Sau đó treo nguyên browser để user có thể test và lấy lại elements
+ * Test Mode: Mở VIA và chạy thử bước approve role setup với viaBmId cố định
  */
 export async function testAutoBmProfiles(
   via: Profile & { password?: string | null },
-  bm: Profile & { bmUid?: string | null },
+  viaBmId: string,
   headless: boolean = false
-): Promise<{ viaRunner: ViaRunner; bmRunner: BMRunner }> {
-  logger.info('🧪 Test Mode: Opening VIA and BM profiles for testing...');
-
-  // Prepare VIA session - chỉ đến bước click avatar
-  const viaRunner = await prepareViaSessionForTest(via, 0, headless);
-  logger.info(`✅ VIA Profile ${via.id}: Opened and ready for testing (at avatar click step)`);
-
-  // Prepare BM session - chỉ đến bước set cookies và navigate xong
-  const bmRunner = await prepareBmSessionForTest(bm, 1, headless);
-  logger.info(`✅ BM Profile ${bm.id}: Opened and ready for testing (at cookies set step)`);
-
-  logger.info('🎯 Test Mode: Both browsers are open and ready. You can now test selectors.');
-  logger.info('⚠️  Note: Browsers will remain open. Close them manually when done testing.');
-
-  return { viaRunner, bmRunner };
-}
-
-/**
- * Prepare VIA session for testing - chỉ đến bước click avatar
- */
-async function prepareViaSessionForTest(
-  via: Profile & { password?: string | null },
-  windowIndex: number = 0,
-  headless: boolean = false
-): Promise<ViaRunner> {
-  // Lấy profile trực tiếp từ database
-  const prisma = getPrismaClient();
-  const profileRaw = await prisma.$queryRawUnsafe<Array<any>>(
-    `SELECT * FROM "Profile" WHERE id = ? AND type = 'VIA' LIMIT 1`,
-    via.id
-  );
-
-  if (!profileRaw || profileRaw.length === 0) {
-    throw new Error(`VIA Profile ${via.id} not found in database`);
+): Promise<{ viaRunner: ViaRunner }> {
+  if (!viaBmId || viaBmId.trim() === '') {
+    throw new Error('viaBmId is required for Test Mode');
   }
 
-  const profile = profileRaw[0];
-  logger.info(`VIA Profile ${profile.id}: Opening Chrome profile at path: ${profile.chromeProfile}`);
+  logger.info('🧪 Test Mode: Opening VIA profile for approve role setup testing...');
+  const viaRunner = await prepareViaSession(via, 0, headless);
+  logger.info(`✅ VIA Profile ${via.id}: Session ready. Navigating to requests page for viaBmId=${viaBmId.trim()}`);
 
-  const runner = new ViaRunner(profile);
-  const windowConfig = calculateWindowPosition(windowIndex);
-  await runner.initialize(windowConfig, headless);
-
-  if (!runner['page']) {
-    throw new Error('Failed to initialize VIA page');
+  try {
+    await viaApproveRoleSetup(viaRunner, viaBmId.trim());
+    logger.info('✅ Test Mode: viaApproveRoleSetup completed. Browser remains open for inspection.');
+  } catch (e) {
+    logger.warn(`⚠️ Test Mode: viaApproveRoleSetup encountered an error: ${(e as Error).message}. Browser remains open for inspection.`);
   }
 
-  const page = runner['page'];
-
-  // Set cookies và navigate (giống prepareViaSession)
-  let baseUrl: string;
-  let targetUrl: string;
-  baseUrl = 'https://www.facebook.com';
-  targetUrl = baseUrl;
-
-  const cookie = (profile as any).cookie;
-  if (cookie && cookie.trim() !== '') {
-    try {
-      const targetDomain = 'facebook.com';
-      const cookies = parseCookieString(cookie, targetDomain);
-
-      if (cookies.length > 0) {
-        await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.setCookie(...cookies);
-
-        const dotDomainCookies = cookies.map(c => ({
-          ...c,
-          domain: '.facebook.com'
-        }));
-        try {
-          await page.setCookie(...dotDomainCookies);
-        } catch (e) {
-          logger.debug(`VIA Profile ${profile.id}: Some cookies couldn't be set with .facebook.com domain`);
-        }
-
-        logger.info(`VIA Profile ${profile.id}: Set ${cookies.length} cookies successfully for ${targetDomain}`);
-
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        await new Promise(resolve => setTimeout(resolve, 3000));
-
-        await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
-
-        const isLoggedIn = await page.evaluate(() => {
-          // @ts-ignore
-          return document.querySelector('[data-testid="blue_bar_profile_link"]') !== null || 
-                 document.querySelector('[aria-label*="Account"]') !== null ||
-                 document.cookie.includes('c_user=');
-        });
-
-        if (isLoggedIn) {
-          logger.info(`VIA Profile ${profile.id}: Successfully logged in using cookies`);
-          return runner;
-        } else {
-          logger.warn(`VIA Profile ${profile.id}: Cookies set but login status unclear, will try password login`);
-        }
-      } else {
-        logger.warn(`VIA Profile ${profile.id}: No valid cookies parsed from cookie string`);
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      }
-    } catch (cookieError: any) {
-      logger.error(`VIA Profile ${profile.id}: Failed to set cookies:`, cookieError);
-      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    }
-  } else {
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  }
-
-  // Đợi page load và reload
-  await new Promise(resolve => setTimeout(resolve, 3000));
-  await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
-  await new Promise(resolve => setTimeout(resolve, 2000));
-
-  // DỪNG Ở ĐÂY - Chỉ đến bước click avatar, không click
-  logger.info(`VIA Profile ${profile.id}: Ready at avatar click step. You can now test selectors.`);
-
-  return runner;
-}
-
-/**
- * Prepare BM session for testing - chỉ đến bước set cookies và navigate xong
- */
-async function prepareBmSessionForTest(
-  bm: Profile & { bmUid?: string | null },
-  windowIndex: number = 0,
-  headless: boolean = false
-): Promise<BMRunner> {
-  // Lấy profile trực tiếp từ database
-  const prisma = getPrismaClient();
-  const profileRaw = await prisma.$queryRawUnsafe<Array<any>>(
-    `SELECT * FROM "Profile" WHERE id = ? AND type = 'BM' LIMIT 1`,
-    bm.id
-  );
-
-  if (!profileRaw || profileRaw.length === 0) {
-    throw new Error(`BM Profile ${bm.id} not found in database`);
-  }
-
-  const profile = profileRaw[0];
-  logger.info(`BM Profile ${profile.id}: Opening Chrome profile at path: ${profile.chromeProfile}`);
-
-  const runner = new BMRunner(profile);
-  const windowConfig = calculateWindowPosition(windowIndex);
-  await runner.initialize(windowConfig, headless);
-
-  if (!runner['page']) {
-    throw new Error('Failed to initialize BM page');
-  }
-
-  const page = runner['page'];
-
-  // Set cookies và navigate (giống prepareBmSession)
-  let baseUrl: string;
-  let targetUrl: string;
-  if (profile.type === 'BM') {
-    baseUrl = 'https://www.facebook.com';
-    const bmUid = (profile as any).bmUid;
-    if (bmUid && bmUid.trim() !== '') {
-      targetUrl = `https://business.facebook.com/latest/home?nav_ref=bm_home_redirect&business_id=${bmUid.trim()}`;
-    } else {
-      targetUrl = 'https://business.facebook.com';
-    }
-  } else {
-    baseUrl = 'https://www.facebook.com';
-    targetUrl = baseUrl;
-  }
-
-  const cookie = (profile as any).cookie;
-  if (cookie && cookie.trim() !== '') {
-    try {
-      const targetDomain = profile.type === 'BM' ? 'business.facebook.com' : 'facebook.com';
-      const cookies = parseCookieString(cookie, targetDomain);
-
-      if (cookies.length > 0) {
-        await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.setCookie(...cookies);
-
-        const dotDomainCookies = cookies.map(c => ({
-          ...c,
-          domain: '.facebook.com'
-        }));
-        try {
-          await page.setCookie(...dotDomainCookies);
-        } catch (e) {
-          logger.debug(`BM Profile ${profile.id}: Some cookies couldn't be set with .facebook.com domain`);
-        }
-
-        logger.info(`BM Profile ${profile.id}: Set ${cookies.length} cookies successfully for ${targetDomain}`);
-
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        await page.reload({ waitUntil: 'networkidle2', timeout: 30000 });
-
-        if (targetUrl !== baseUrl) {
-          await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
-          const bmUid = (profile as any).bmUid;
-          if (bmUid && bmUid.trim() !== '') {
-            logger.info(`BM Profile ${profile.id}: Navigated to BM dashboard with business_id=${bmUid}`);
-          }
-        }
-      } else {
-        logger.warn(`BM Profile ${profile.id}: No valid cookies parsed from cookie string`);
-        await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      }
-    } catch (cookieError: any) {
-      logger.error(`BM Profile ${profile.id}: Failed to set cookies:`, cookieError);
-      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    }
-  } else {
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  }
-
-  // DỪNG Ở ĐÂY - Đã set cookies và navigate xong
-  logger.info(`BM Profile ${profile.id}: Ready at cookies set step. You can now test selectors.`);
-
-  return runner;
+  return { viaRunner };
 }
 
 /**
@@ -964,7 +1033,7 @@ export async function viaHandleInviteAndExtractIds(
   }
 
   // Bước 1: Paste link invite từ database, click vào accept block
-  await page.goto(inviteLink, { waitUntil: 'networkidle2', timeout: 30000 });
+  await page.goto(inviteLink, { waitUntil: 'networkidle2', timeout: 10000 });
   // await new Promise(resolve => setTimeout(resolve, 3000));
 
   // // Đợi page load hoàn toàn
@@ -981,7 +1050,7 @@ export async function viaHandleInviteAndExtractIds(
 
   if (loginFacebookClicked) {
     logger.info('Clicked "Login" button');
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, 5000));
   } else {
     logger.warn('Could not find "Login" button, continuing...');
   }
@@ -1030,7 +1099,7 @@ export async function viaHandleInviteAndExtractIds(
   const continue1Clicked = await waitAndClick(page, continue1Selectors, 10000);
 
   if (continue1Clicked) {
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, 5000));
   } else {
     logger.warn('Could not find first continue button');
   }
@@ -1045,7 +1114,7 @@ export async function viaHandleInviteAndExtractIds(
   const continue2Clicked = await waitAndClick(page, continue2Selectors, 10000);
 
   if (continue2Clicked) {
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, 5000));
   } else {
     logger.warn('Could not find second continue button');
   }
@@ -1058,24 +1127,9 @@ export async function viaHandleInviteAndExtractIds(
   const acceptClicked = await waitAndClick(page, acceptSelectors, 10000);
 
   if (acceptClicked) {
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    await new Promise(resolve => setTimeout(resolve, 5000));
   } else {
     logger.warn('Could not find accept invitation button');
-  }
-
-  const postAcceptBlockSelectors = selectors()
-    .xpath('//*[@id="globalContainer"]/div[1]/div[1]/div[1]/div[2]/div[1]/div[1]')
-    .css('div#globalContainer > div:nth-of-type(1) > div:nth-of-type(1) > div.x78zum5:nth-of-type(1) > div.x6s0dn4:nth-of-type(2) > div:nth-of-type(1) > div.x78zum5:nth-of-type(1)')
-    .build();
-
-  const blockDetected = await elementExists(page, postAcceptBlockSelectors);
-
-  if (blockDetected) {
-    logger.warn('Detected block screen after accepting invite, skipping to next link');
-    await new Promise(resolve => setTimeout(resolve, 30000));
-
-    throw new Error('Invite blocked after accept, continue with next link');
-    
   }
 
   // Bước 6: Đợi khi nào page chuyển qua thành
@@ -1104,34 +1158,60 @@ export async function viaHandleInviteAndExtractIds(
     `https://business.facebook.com/latest/settings/ad_accounts?business_id=${viaBmId}`,
     { waitUntil: 'networkidle2', timeout: 30000 }
   );
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  await new Promise(resolve => setTimeout(resolve, 5000));
 
   // Bước 8: Lấy Via-UID-Ad-Account
-  // CSS: #js_6g hoặc #js_6g > a
-  // Xpath: //*[@id="js_6g"]/a hoặc //*[@id="js_6g"]
+
   // Copy text ở đó hoặc click vào đó để copy
   let viaAdAccountUid = '';
   try {
-    await page.waitForSelector('#js_6g', { timeout: 15000 });
-    await new Promise(resolve => setTimeout(resolve, 1000));
 
-    const viaAdAccountXPath =
-      '/html/body/div[1]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div[2]/div/div[1]/div/div[1]/div/div[2]/div[2]/div/a';
+    const viaAdAccountXPaths = [
+      '/html/body/div[1]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div[2]/div/div[1]/div/div[1]/div/div[2]/div[2]/div/a',
+      '/html/body/div[1]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div[2]/div/div[1]/div/div[1]/div/div[2]/div[2]/div',
+      '/html/body/div[1]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div[2]/div/div[1]/div/div[1]/div/div[2]/div[2]/div',
+      '/html/body/div[1]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[2]/div[1]/div[2]/div[2]/div/div[1]/div/div[1]/div/div[2]/div[2]',
+      '//div[normalize-space(text())="ID:"]/following::a[1]',
+      '//div[contains(normalize-space(.), "ID:")]/div/a'
+    ];
 
-    const viaAdAccountSelectors = selectors()
-      .xpath(viaAdAccountXPath)
-      .build();
+    const selectorBuilder = selectors();
+    viaAdAccountXPaths.forEach(xpath => selectorBuilder.xpath(xpath));
+    const viaAdAccountSelectors = selectorBuilder.build();
 
-    const viaAdAccountClicked = await waitAndClick(page, viaAdAccountSelectors, 10000);
+    let fallbackXPath = viaAdAccountXPaths[0];
 
-    if (!viaAdAccountClicked) {
-      throw new Error('Could not click Via-UID-Ad-Account element for manual copy');
+    for (const selector of viaAdAccountSelectors) {
+      const text = await getTextFromSelector(page, selector);
+      if (text) {
+        viaAdAccountUid = text;
+        if (selector.startsWith('//')) {
+          fallbackXPath = selector;
+        }
+        break;
+      }
+
+      if (selector.startsWith('//')) {
+        fallbackXPath = selector;
+      }
     }
 
-    viaAdAccountUid = await readClipboardText(page);
+    if (!viaAdAccountUid) {
+      const viaAdAccountClicked = await waitAndClick(page, viaAdAccountSelectors, 10000);
+
+      if (!viaAdAccountClicked) {
+        throw new Error('Could not click Via-UID-Ad-Account element for manual copy');
+      }
+
+      viaAdAccountUid = await readClipboardText(page);
+    }
 
     if (!viaAdAccountUid) {
-      viaAdAccountUid = await selectAndCopyByXPath(page, viaAdAccountXPath);
+      viaAdAccountUid = await getTextByFullXPaths(page, viaAdAccountXPaths);
+    }
+
+    if (!viaAdAccountUid && fallbackXPath) {
+      viaAdAccountUid = await selectAndCopyByXPath(page, fallbackXPath);
     }
 
     if (!viaAdAccountUid) {
@@ -1166,15 +1246,21 @@ export async function bmAddAdAccountAndSetRole(
     `https://business.facebook.com/latest/settings/ad_accounts?business_id=${bmUid}`,
     { waitUntil: 'networkidle2', timeout: 30000 }
   );
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  await new Promise(resolve => setTimeout(resolve, 5000));
+  await ensureBodySpanRemoved(page);
+  await removeVerificationPopupIfPresent(page);
 
   // Bước 2: Nhấn vào +Add
   // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
   const addSelectors = selectors()
-    .xpath('//*[@id="mount_0_0_MY"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[1]/div/div/div/div/div/div[2]/div[3]/div')
-    .xpath('//*[@id="mount_0_0_MY"]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[1]/div/div/div/div/div/div[2]/div[3]/div/span/div/div')
     .xpath('/html/body/div[1]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[1]/div/div/div/div/div/div[2]/div[3]/div')
+    .xpath('/html/body/div[1]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[1]/div/div/div/div/div/div[2]/div[3]/div/span')
+    .xpath('/html/body/div[1]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[1]/div/div/div/div/div/div[2]/div[3]/div/span/div/div')
+    .xpath('/html/body/div[1]/div/div[1]/div/div[2]/div/div/div[1]/span/div/div/div[1]/div[1]/div/div[2]/div/div/div/div/div/div/div/div[2]/div[2]/div/div/div/div/div[1]/div/div/div/div/div/div[2]/div[3]/div/span/div/div/div[2]')
+    .xpath('//div[@role="button" and .//span[contains(normalize-space(.), "Add")]]')
+    .xpath('//div[contains(@aria-label, "Add")]')
     .build();
+  await removeVerificationPopupIfPresent(page);
   const addClicked = await waitAndClick(page, addSelectors, 15000);
 
   if (!addClicked) {
@@ -1190,36 +1276,67 @@ export async function bmAddAdAccountAndSetRole(
           (addButton as HTMLElement).click();
         }
       });
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      await new Promise(resolve => setTimeout(resolve, 5000));
     } catch (e) {
       throw new Error(`Failed to click +Add button: ${(e as Error).message}`);
     }
   } else {
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, 5000));
   }
 
-  // Bước 3: Click vào "Add an ad account"
+  // Bước 3: Click vào "Request access to an ad account in another business portfolio"
   // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
   const addAdAccountSelectors = selectors()
-    .css('#js_7l')
-    .css('#js_7m')
-    .xpath('//*[@id="js_7m"]')
-    .xpath('//*[@id="js_7l"]')
-    .xpath('//*[@id="js_7k"]/div/div/div/div/div/div')
-    .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div[2]/div[1]/div[2]/div/div[2]/div[2]/div[3]/div/div/div/div/div/div/div/div/div/div/div[3]/div[2]')
+    .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div[2]/div[1]/div[2]/div/div[2]/div[2]/div[3]')
+    .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div[2]/div[1]/div[2]/div/div[2]/div[2]/div[3]/div')
+    .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div[2]/div[1]/div[2]/div/div[2]/div[2]/div[3]/div/div')
+    .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div[2]/div[1]/div[2]/div/div[2]/div[2]/div[3]/div/div/div')
+    .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div[2]/div[1]/div[2]/div/div[2]/div[2]/div[3]/div/div/div/div')
+    .xpath('//div[contains(@class, "x1vvvo52") and contains(normalize-space(.), "Request access to an ad account in another business portfolio")]')
+    .xpath('//div[contains(@class, "x1rg5ohu") and .//div[contains(normalize-space(.), "Request access to an ad account in another business portfolio")]]')
+    .xpath('//div[contains(@class, "x1vvvo52") and contains(@class, "xq9mrsl") and contains(normalize-space(.), "Request access to an ad account in another business portfolio")]')
+    .xpath('//p[contains(normalize-space(.), "Agencies who need access to their client")]/ancestor::div[contains(@role, "button")]')
+    .xpath('//p[contains(normalize-space(.), "Best for: Agencies who need access to their client")]/parent::div')
     .build();
+  await removeVerificationPopupIfPresent(page);
   const addAdAccountClicked = await waitAndClick(page, addAdAccountSelectors, 10000);
 
   if (!addAdAccountClicked) {
-    throw new Error('Could not find "Add an ad account" option');
+    let textClickSuccess = false;
+    try {
+      await page.evaluate(() => {
+        const candidates = Array.from(document.querySelectorAll('div, button, span')).filter(el => {
+          const text = (el.textContent || '').trim();
+          return text.includes('Request access to an ad account in another business portfolio');
+        });
+        const target = candidates.find(el => el instanceof HTMLElement) as HTMLElement | undefined;
+        if (target) {
+          target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          target.click();
+          (window as any).__bmTextClickSuccess = true;
+        } else {
+          (window as any).__bmTextClickSuccess = false;
+        }
+      });
+      textClickSuccess = await page.evaluate(() => Boolean((window as any).__bmTextClickSuccess));
+    } catch (e) {
+      textClickSuccess = false;
+      logger.warn(`Fallback click by text failed for request access option: ${(e as Error).message}`);
+    }
+
+    if (!textClickSuccess) {
+      throw new Error('Could not find "Request access to an ad account in another business portfolio" option');
+    }
   }
 
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  await new Promise(resolve => setTimeout(resolve, 5000));
 
   // Bước 4: Nhập Via-UID-Ad-Account vừa nhận được vào:
   // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
   const accountIdSelectors = selectors()
-    .css('#js_8m')
+    .css('input[placeholder="Ad account ID"]')
+    .xpath('//input[@placeholder="Ad account ID"]')
+    .xpath('//input[contains(@class, "xjbqb8w") and contains(@class, "x10emqs4") and @type="text"]')
     .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[2]/div[1]/div[2]/div[2]/div[1]/div[2]/div/div/div/div[1]/div[2]/div/div/input')
     .build();
   const accountIdTyped = await typeIntoInput(page, accountIdSelectors, viaAdAccountUid, 10000);
@@ -1228,16 +1345,17 @@ export async function bmAddAdAccountAndSetRole(
     throw new Error('Could not find ad account input field');
   }
 
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  await new Promise(resolve => setTimeout(resolve, 5000));
 
   // Sau đó nhấn next
   // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
   const nextSelectors = selectors()
-    .xpath('//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div[2]/div')
-    .xpath('//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div[2]/div/span/div/div')
+    .xpath('//div[contains(@class, "x1vvvo52") and normalize-space(text())="Next"]')
+    .xpath('//div[contains(@role, "button") and normalize-space(text())="Next"]')
     .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div[2]/div/span/div/div/div')
-    .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div[2]/div/span')
+    .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div[2]/div')
     .build();
+  await removeVerificationPopupIfPresent(page);
   const nextClicked = await waitAndClick(page, nextSelectors, 10000);
 
   if (!nextClicked) {
@@ -1257,46 +1375,49 @@ export async function bmAddAdAccountAndSetRole(
     }
   }
 
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  await new Promise(resolve => setTimeout(resolve, 5000));
 
   // Bước 5: Click vào để toggle full access role
   // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
   const toggleSelectors = selectors()
-    .css('#js_95')
-    .xpath('//*[@id="js_95"]')
-    .xpath('//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[2]/div[1]/div[3]/div/div[2]/div/div[2]/div/div/div/div/span/div/div[1]/div/div[1]')
-    .xpath('//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[2]/div[1]/div[3]/div/div[2]/div/div[2]/div/div/div/div/span/div/div[1]/div/div[2]')
+    .css('input[aria-label="Manage ad accounts"]')
+    .xpath('//input[@aria-label="Manage ad accounts"]')
+    .xpath('//input[@role="switch" and contains(@class, "xjyslct")]')
     .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[2]/div[1]/div[3]/div[2]/div[2]/div/div[2]/div/div/div/div/span/div/div[1]/input')
     .build();
+  await removeVerificationPopupIfPresent(page);
   const toggleClicked = await waitAndClick(page, toggleSelectors, 10000);
 
   if (!toggleClicked) {
     logger.warn('Could not find full access toggle');
   } else {
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await new Promise(resolve => setTimeout(resolve, 5000));
   }
 
   // Sau đó, click confirm để hoàn thành
   // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
   const confirmSelectors = selectors()
-    .css('#js_8y')
-    .xpath('//*[@id="js_8y"]/span/div/div/div')
+    .xpath('//div[contains(@class, "x1vvvo52") and normalize-space(text())="Confirm"]')
+    .xpath('//div[contains(@role, "button") and normalize-space(text())="Confirm"]')
     .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div[2]/div/span/div/div/div')
     .build();
+  await removeVerificationPopupIfPresent(page);
   const confirmClicked = await waitAndClick(page, confirmSelectors, 10000);
 
   if (!confirmClicked) {
     logger.warn('Could not find confirm button');
   } else {
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, 5000));
   }
 
   // Bước 6: Click done để hoàn tất
   // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
   const doneSelectors = selectors()
-    .xpath('//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div/div')
-    .xpath('//*[@id="facebook"]/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div/div/span/div/div/div')
+    .xpath('//div[contains(@class, "x1vvvo52") and normalize-space(text())="Done"]')
+    .xpath('//div[contains(@role, "button") and normalize-space(text())="Done"]')
+    .xpath('/html/body/span/div/div[1]/div[1]/div/div/div/div/div/div[1]/div[2]/div[2]/div/div/div[3]/div/div/div/span/div/div/div')
     .build();
+  await removeVerificationPopupIfPresent(page);
   const doneClicked = await waitAndClick(page, doneSelectors, 10000);
 
   if (!doneClicked) {
@@ -1316,7 +1437,7 @@ export async function bmAddAdAccountAndSetRole(
     }
   }
 
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  await new Promise(resolve => setTimeout(resolve, 5000));
 }
 
 /**
@@ -1338,7 +1459,7 @@ export async function viaApproveRoleSetup(
     `https://business.facebook.com/latest/settings/requests?business_id=${viaBmId}`,
     { waitUntil: 'networkidle2', timeout: 30000 }
   );
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  await new Promise(resolve => setTimeout(resolve, 5000));
 
   // Đợi load xong, click vào request trong bảng
   // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
@@ -1355,7 +1476,7 @@ export async function viaApproveRoleSetup(
     throw new Error('Could not find request in table');
   }
 
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  await new Promise(resolve => setTimeout(resolve, 5000));
 
   // Bước 2: Chọn approve
   // Dễ dàng thêm selectors mới: selectors().css('#selector').xpath('//xpath').build()
@@ -1371,7 +1492,7 @@ export async function viaApproveRoleSetup(
     throw new Error('Could not find Approve button');
   }
 
-  await new Promise(resolve => setTimeout(resolve, 2000));
+  await new Promise(resolve => setTimeout(resolve, 5000));
 }
 
 /**
@@ -1394,7 +1515,7 @@ export async function runAutoBmScript(opts: AutoBmOptions): Promise<void> {
   });
 
   // Chia inviteLinks cho các VIA theo round-robin
-  const viaTasks: Array<{ via: Profile; link: string; index: number }> = [];
+  const viaTasks: ViaTask[] = [];
   inviteLinks.forEach((link, index) => {
     const viaIndex = index % vias.length;
     viaTasks.push({
@@ -1467,16 +1588,9 @@ export async function runAutoBmScript(opts: AutoBmOptions): Promise<void> {
 
       logger.info(`Round ${roundIndex + 1} for pair: processing ${roundTasks.length} tasks`);
 
-      // Process round: chạy tuần tự cho các VIA trong round (không song song để tránh conflict)
-      for (const task of roundTasks) {
-        if (isCancelled && isCancelled()) {
-          logger.info('Script cancelled during round processing');
-          break;
-        }
-
+      const contexts: RoundTaskContext[] = roundTasks.map((task) => {
         const taskId = `${task.via.id}-${task.index}-${Date.now()}`;
         const viaUid = (task.via as any).username || (task.via as any).uid || '';
-
         const result: TaskResult = {
           id: taskId,
           viaUid,
@@ -1485,91 +1599,122 @@ export async function runAutoBmScript(opts: AutoBmOptions): Promise<void> {
           status: 'running',
           timestamp: Date.now(),
         };
-
         onLog?.(result);
+        return {
+          task,
+          taskId,
+          viaRunner: null,
+          result,
+        };
+      });
 
-        let viaRunner: ViaRunner | null = null;
-        try {
-          logger.info(`Processing task ${taskId}: VIA ${viaUid}, link ${task.link}`);
+      await Promise.all(
+        contexts.map(async (ctx) => {
+          if (isCancelled && isCancelled()) {
+            ctx.extractionError = new Error('Script cancelled');
+            return;
+          }
 
-          const viaId = task.via.id;
-          const existingRunner = viaRunnerMap.get(viaId) || null;
+          try {
+            ctx.viaRunner = await ensureViaRunner(
+              ctx.task.via,
+              viaRunnerMap,
+              viaWindowIndexMap,
+              vias,
+              headless
+            );
 
-          if (existingRunner && isRunnerPageActive(existingRunner)) {
-            viaRunner = existingRunner;
-            logger.info(`Reusing VIA session for profile ${viaId}`);
-          } else {
-            if (existingRunner) {
-              logger.warn(`Existing VIA session for ${viaId} is not usable, recreating...`);
+            logger.info(`Processing task ${ctx.taskId}: VIA ${(ctx.task.via as any).username || ctx.task.via.id}, link ${ctx.task.link}`);
+            logger.info(`VIA ${ctx.task.via.id}: Handling invite and extracting IDs`);
+            const { viaBmId, viaAdAccountUid } = await viaHandleInviteAndExtractIds(
+              ctx.viaRunner,
+              ctx.task.link
+            );
+
+            ctx.viaBmId = viaBmId;
+            ctx.viaAdAccountUid = viaAdAccountUid;
+
+            ctx.result.viaBmId = viaBmId;
+            ctx.result.viaAdAccountUid = viaAdAccountUid;
+            onLog?.(ctx.result);
+
+            logger.info(
+              `VIA ${ctx.task.via.id}: Extracted viaBmId=${viaBmId}, viaAdAccountUid=${viaAdAccountUid}`
+            );
+          } catch (error: any) {
+            ctx.extractionError = error instanceof Error ? error : new Error(String(error));
+            logger.error(`Task ${ctx.taskId} extraction failed:`, error);
+
+            const viaRunner = ctx.viaRunner;
+            if (viaRunner && !isRunnerPageActive(viaRunner)) {
+              viaRunnerMap.delete(ctx.task.via.id);
+            } else if (viaRunner) {
               try {
-                await existingRunner['browser']?.close();
-              } catch (e) {
-                // ignore cleanup errors
+                await viaRunner['page']?.goto('about:blank', {
+                  waitUntil: 'domcontentloaded',
+                  timeout: 10000,
+                });
+              } catch (resetError) {
+                logger.warn(`Failed to reset VIA session for ${ctx.task.via.id}: ${resetError}`);
+                viaRunnerMap.delete(ctx.task.via.id);
               }
-              viaRunnerMap.delete(viaId);
             }
-
-            const viaWindowIndex =
-              viaWindowIndexMap.get(viaId) ??
-              (1 + Math.max(0, vias.findIndex((v) => v.id === viaId)));
-
-            logger.info(`Preparing VIA session for profile ${viaId}`);
-            viaRunner = await prepareViaSession(task.via as any, viaWindowIndex, headless);
-            viaRunnerMap.set(viaId, viaRunner);
           }
+        })
+      );
 
-          if (!viaRunner) {
-            throw new Error(`Unable to initialize VIA session for ${viaId}`);
-          }
-
-          // VIA xử lý invite và lấy IDs
-          logger.info(`VIA ${task.via.id}: Handling invite and extracting IDs`);
-          const { viaBmId, viaAdAccountUid } = await viaHandleInviteAndExtractIds(
-            viaRunner,
-            task.link
-          );
-
-          result.viaBmId = viaBmId;
-          result.viaAdAccountUid = viaAdAccountUid;
-          onLog?.(result);
-
-          logger.info(`VIA ${task.via.id}: Extracted viaBmId=${viaBmId}, viaAdAccountUid=${viaAdAccountUid}`);
-
-          // BM add ad account và set role (rate limit: chỉ 2 lần per round)
-          logger.info(`BM ${bm.id}: Adding ad account ${viaAdAccountUid} and setting role`);
-          await bmAddAdAccountAndSetRole(bmRunner, bmUid, viaAdAccountUid);
-
-          // VIA approve role setup
-          logger.info(`VIA ${task.via.id}: Approving role setup for viaBmId=${viaBmId}`);
-          await viaApproveRoleSetup(viaRunner, viaBmId);
-
-          result.status = 'success';
-          onLog?.(result);
-
+      for (const ctx of contexts) {
+        if (ctx.extractionError || !ctx.viaRunner || !ctx.viaBmId || !ctx.viaAdAccountUid) {
+          ctx.result.status = 'error';
+          ctx.result.errorMessage =
+            ctx.extractionError?.message || 'Failed to extract Via IDs before BM processing';
+          onLog?.(ctx.result);
           doneCount++;
           onProgress?.(doneCount, totalLinks);
+          continue;
+        }
 
-          logger.info(`Task ${taskId} completed successfully`);
+        if (isCancelled && isCancelled()) {
+          ctx.result.status = 'error';
+          ctx.result.errorMessage = 'Script cancelled';
+          onLog?.(ctx.result);
+          doneCount++;
+          onProgress?.(doneCount, totalLinks);
+          continue;
+        }
+
+        try {
+          logger.info(`BM ${bm.id}: Adding ad account ${ctx.viaAdAccountUid} and setting role`);
+          await bmAddAdAccountAndSetRole(bmRunner, bmUid, ctx.viaAdAccountUid);
+
+          logger.info(`VIA ${ctx.task.via.id}: Approving role setup for viaBmId=${ctx.viaBmId}`);
+          await viaApproveRoleSetup(ctx.viaRunner, ctx.viaBmId);
+
+          ctx.result.status = 'success';
+          onLog?.(ctx.result);
+          logger.info(`Task ${ctx.taskId} completed successfully`);
         } catch (error: any) {
-          result.status = 'error';
-          result.errorMessage = error.message || 'Unknown error';
-          onLog?.(result);
+          ctx.result.status = 'error';
+          ctx.result.errorMessage = error.message || 'Unknown error';
+          onLog?.(ctx.result);
+          logger.error(`Task ${ctx.taskId} failed:`, error);
 
-          doneCount++;
-          onProgress?.(doneCount, totalLinks);
-
-          logger.error(`Task ${taskId} failed:`, error);
-
-          if (viaRunner && !isRunnerPageActive(viaRunner)) {
-            viaRunnerMap.delete(task.via.id);
-          } else if (viaRunner) {
+          if (ctx.viaRunner && !isRunnerPageActive(ctx.viaRunner)) {
+            viaRunnerMap.delete(ctx.task.via.id);
+          } else if (ctx.viaRunner) {
             try {
-              await viaRunner['page']?.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 10000 });
+              await ctx.viaRunner['page']?.goto('about:blank', {
+                waitUntil: 'domcontentloaded',
+                timeout: 10000,
+              });
             } catch (resetError) {
-              logger.warn(`Failed to reset VIA session for ${task.via.id}: ${resetError}`);
-              viaRunnerMap.delete(task.via.id);
+              logger.warn(`Failed to reset VIA session for ${ctx.task.via.id}: ${resetError}`);
+              viaRunnerMap.delete(ctx.task.via.id);
             }
           }
+        } finally {
+          doneCount++;
+          onProgress?.(doneCount, totalLinks);
         }
       }
 

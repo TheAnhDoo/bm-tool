@@ -558,22 +558,10 @@ export function setupIPCHandlers(mainWindow: BrowserWindow | null) {
     return { success: true };
   });
 
-  ipcMain.handle('autoBm:test', async (_event, data: { bmId: number; viaId: number; headless?: boolean }) => {
+  ipcMain.handle('autoBm:test', async (_event, data: { viaId: number; viaBmId: string; headless?: boolean }) => {
     try {
       // Get profiles from database
       const prisma = getPrismaClient();
-      
-      // Get BM profile
-      const bmRaw = await prisma.$queryRawUnsafe<Array<any>>(
-        `SELECT * FROM "Profile" WHERE id = ? AND type = 'BM' LIMIT 1`,
-        data.bmId
-      );
-      
-      if (!bmRaw || bmRaw.length === 0) {
-        throw new Error('BM profile not found');
-      }
-      
-      const bm = bmRaw[0];
 
       // Get VIA profile
       const viaRaw = await prisma.$queryRawUnsafe<Array<any>>(
@@ -584,26 +572,18 @@ export function setupIPCHandlers(mainWindow: BrowserWindow | null) {
       if (!viaRaw || viaRaw.length === 0) {
         throw new Error('VIA profile not found');
       }
-      
-      const via = viaRaw[0];
 
-      // Map uid to username for backward compatibility
-      const bmWithUsername = {
-        ...bm,
-        username: bm.username || bm.uid || null,
-      };
-      
+      const via = viaRaw[0];
       const viaWithUsername = {
         ...via,
         username: via.username || via.uid || null,
       };
 
-      // Import and run test function
       const { testAutoBmProfiles } = await import('../modules/autoBmScript');
-      
+
       await testAutoBmProfiles(
         viaWithUsername as any,
-        bmWithUsername as any,
+        data.viaBmId,
         data.headless || false
       );
 

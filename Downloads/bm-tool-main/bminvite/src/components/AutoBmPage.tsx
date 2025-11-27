@@ -26,20 +26,18 @@ export function AutoBmPage() {
   const [selectedViaIds, setSelectedViaIds] = useState<number[]>([]);
   const [inviteLinks, setInviteLinks] = useState("");
   const [isRunning, setIsRunning] = useState(false);
-  const [isCancelled, setIsCancelled] = useState(false);
   const [logs, setLogs] = useState<TaskResult[]>([]);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
-  const [loading, setLoading] = useState(true);
   const [bmSearchQuery, setBmSearchQuery] = useState("");
   const [viaSearchQuery, setViaSearchQuery] = useState("");
   const [headless, setHeadless] = useState(false);
+  const [testViaBmId, setTestViaBmId] = useState('1377944550624786');
 
   useEffect(() => {
     loadProfiles();
   }, []);
 
   const loadProfiles = async () => {
-    setLoading(true);
     try {
       const [bmResult, viaResult] = await Promise.all([
         api.listProfiles({ type: 'BM' }),
@@ -76,7 +74,7 @@ export function AutoBmPage() {
       console.error('Failed to load profiles:', error);
       alert(`Failed to load profiles: ${error.message || 'Unknown error'}`);
     } finally {
-      setLoading(false);
+      // no loading indicator
     }
   };
 
@@ -142,7 +140,6 @@ export function AutoBmPage() {
     }
 
     setIsRunning(true);
-    setIsCancelled(false);
     setLogs([]);
     setProgress({ done: 0, total: links.length });
 
@@ -184,7 +181,6 @@ export function AutoBmPage() {
   };
 
   const handleStop = () => {
-    setIsCancelled(true);
     setIsRunning(false);
   };
 
@@ -194,28 +190,17 @@ export function AutoBmPage() {
   };
 
   const handleTest = async () => {
-    if (!selectedBmId) {
-      alert('Vui lòng chọn BM trung gian');
+    if (selectedViaIds.length !== 1) {
+      alert('Vui lòng chọn đúng 1 VIA để test bước approve.');
       return;
     }
 
-    if (selectedViaIds.length === 0) {
-      alert('Vui lòng chọn ít nhất một VIA');
+    if (!testViaBmId.trim()) {
+      alert('Vui lòng nhập viaBmId để test.');
       return;
     }
 
-    if (selectedViaIds.length > 1) {
-      alert('Test Mode chỉ hỗ trợ 1 VIA. Vui lòng chọn chỉ 1 VIA.');
-      return;
-    }
-
-    const selectedBM = bmProfiles.find((p) => p.id === selectedBmId);
-    const selectedVIA = viaProfiles.find((p) => selectedViaIds.includes(p.id));
-
-    if (!selectedBM) {
-      alert('BM trung gian không tồn tại');
-      return;
-    }
+    const selectedVIA = viaProfiles.find((p) => p.id === selectedViaIds[0]);
 
     if (!selectedVIA) {
       alert('VIA không tồn tại');
@@ -224,8 +209,8 @@ export function AutoBmPage() {
 
     try {
       const result = await api.testAutoBmProfiles({
-        bmId: selectedBM.id,
         viaId: selectedVIA.id,
+        viaBmId: testViaBmId.trim(),
         headless: headless,
       });
 
@@ -233,7 +218,7 @@ export function AutoBmPage() {
         throw new Error(result.error || 'Failed to run test');
       }
 
-      alert('✅ Test Mode: Đã mở VIA và BM profiles. Browsers sẽ giữ nguyên để bạn test selectors.\n\nVIA: Đã đến bước click avatar\nBM: Đã set cookies và navigate xong');
+      alert('✅ Test Mode: Đã mở VIA và chạy thử bước approve role setup. Browser sẽ giữ nguyên để bạn test selectors.');
     } catch (error: any) {
       console.error('Test Mode error:', error);
       alert(`Error: ${error.message || 'Đã xảy ra lỗi khi chạy test mode'}`);
@@ -309,7 +294,7 @@ export function AutoBmPage() {
             className="rounded-xl gap-2"
             style={{ backgroundColor: "#8B5CF6" }}
             onClick={handleTest}
-            disabled={isRunning || !selectedBmId || selectedViaIds.length !== 1}
+            disabled={isRunning || selectedViaIds.length !== 1}
           >
             <TestTube size={18} />
             Test Mode
@@ -327,6 +312,17 @@ export function AutoBmPage() {
             >
               Headless Mode
             </label>
+          </div>
+          <div className="flex items-center gap-2 ml-4">
+            <label className="text-sm" style={{ color: "#6B7280" }}>
+              viaBmId test:
+            </label>
+            <Input
+              value={testViaBmId}
+              onChange={(e) => setTestViaBmId(e.target.value)}
+              className="w-48 text-sm"
+              placeholder="Enter viaBmId"
+            />
           </div>
           {isRunning && (
             <div className="ml-auto text-sm" style={{ color: "#6B7280" }}>
